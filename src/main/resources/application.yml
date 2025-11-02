@@ -41,3 +41,11 @@ logging:
   level:
     root: INFO
     org.example: DEBUG
+
+oss:
+  endpoint: ${OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+  access-key-id:
+  ${OSS_ACCESS_KEY_ID:}
+  bucket: ${OSS_BUCKET:}
+  public-domain: ${OSS_PUBLIC_DOMAIN:}
+  folder: avatars
