@@ -1,4 +1,17 @@
 # 项目文档
+
+## 本地开发环境
+
+这个仓库已经提供 Docker Compose 开发环境，MySQL、Redis、Kafka、Elasticsearch、Canal 可以一键启动。新 Mac 从零配置请先看：[docs/development-setup.md](docs/development-setup.md)。
+
+快速启动依赖：
+
+```bash
+cp .env.example .env
+docker compose up -d mysql redis kafka kafka-init elasticsearch canal
+mvn spring-boot:run -Dspring-boot.run.profiles=local
+```
+
 <div style="display: flex; gap: 10px;">
   <img src="http://zhiguangapp.oss-cn-beijing.aliyuncs.com/posts/262804640385601536/images/20251226/11a8438f.png" width="250" />
   <img src="http://zhiguangapp.oss-cn-beijing.aliyuncs.com/posts/262804640385601536/images/20251226/4035ca79.png" width="250" />
