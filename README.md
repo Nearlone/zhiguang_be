@@ -4,6 +4,8 @@
 
 这个仓库已经提供 Docker Compose 开发环境，MySQL、Redis、Kafka、Elasticsearch、Canal 可以一键启动。新 Mac 从零配置请先看：[docs/development-setup.md](docs/development-setup.md)。
 
+生产部署与版本迭代请看：[docs/deployment-1panel-runbook.md](docs/deployment-1panel-runbook.md)。
+
 快速启动依赖：
 
 ```bash

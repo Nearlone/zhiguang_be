@@ -40,5 +40,21 @@ build/
 
 ### Local environment ###
 .env
+.env.*
 .env.local
 !.env.example
+!.env.*.example
+src/main/resources/application-local.yml
+src/main/resources/application-*.local.yml
+!src/main/resources/application-local.example.yml
+
+### Local secrets and production-only credentials ###
+.local-secrets/
+deploy/secrets/
+deploy/**/secrets/
+src/main/resources/keys/private.pem
+src/main/resources/keys/*.private.pem
+*.local.pem
+*.local.key
+*.p12
+*.jks

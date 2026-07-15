@@ -71,8 +71,8 @@ canal:
   host: localhost
   port: 11111
   destination: example
-  username: "canal"
-  password: "Canal@123456"
+  username: ${CANAL_USERNAME:}
+  password: ${CANAL_PASSWORD:}
   filter: zhiguang\.outbox
   batchSize: 1000
   intervalMs: 1000

@@ -27,6 +27,7 @@ import com.tongji.auth.verification.VerificationCheckResult;
 import com.tongji.auth.verification.VerificationCodeStatus;
 import com.tongji.auth.verification.VerificationScene;
 import com.tongji.auth.verification.VerificationService;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
@@ -123,7 +124,12 @@ public class AuthService {
             user.setPasswordHash(passwordEncoder.encode(request.password().trim()));
         }
 
-        userService.createUser(user);
+        try {
+            userService.createUser(user);
+        } catch (DuplicateKeyException ex) {
+            // The database unique index is the final guard for concurrent registrations.
+            throw new BusinessException(ErrorCode.IDENTIFIER_EXISTS);
+        }
         TokenPair tokenPair = jwtService.issueTokenPair(user);
         storeRefreshToken(user.getId(), tokenPair);
         loginLogService.record(user.getId(), identifier, "REGISTER", clientInfo.ip(), clientInfo.userAgent(), "SUCCESS");
