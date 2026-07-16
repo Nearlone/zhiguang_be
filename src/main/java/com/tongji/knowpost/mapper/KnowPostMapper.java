@@ -21,6 +21,15 @@ public interface KnowPostMapper {
 
     int publish(@Param("id") Long id, @Param("creatorId") Long creatorId);
 
+    // RAG 状态独立更新，不修改知文业务更新时间，避免触发无关的搜索/缓存语义。
+    int markRagIndexing(@Param("id") Long id);
+
+    int markRagIndexReady(@Param("id") Long id, @Param("chunkCount") int chunkCount);
+
+    int markRagIndexFailed(@Param("id") Long id, @Param("error") String error);
+
+    int markRagNotIndexed(@Param("id") Long id);
+
     // 首页 Feed 列表（已发布、公开可见），置顶优先，其次按发布时间倒序。
     List<KnowPostFeedRow> listFeedPublic(@Param("limit") int limit,
                                          @Param("offset") int offset);

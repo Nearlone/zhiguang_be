@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS know_posts (
     img_urls JSON NULL COMMENT '图片URL数组或对象数组',
     video_url TEXT NULL COMMENT '视频URL（一期不使用）',
     status VARCHAR(16) NOT NULL DEFAULT 'draft',
+    rag_index_status VARCHAR(16) NOT NULL DEFAULT 'NOT_INDEXED' COMMENT 'NOT_INDEXED/PENDING/INDEXING/READY/FAILED',
+    rag_index_error VARCHAR(512) NULL COMMENT '可安全展示的索引失败原因',
+    rag_index_chunk_count INT UNSIGNED NOT NULL DEFAULT 0,
+    rag_indexed_at TIMESTAMP NULL DEFAULT NULL,
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     publish_time TIMESTAMP NULL DEFAULT NULL,
@@ -68,6 +72,7 @@ CREATE TABLE IF NOT EXISTS know_posts (
     KEY ix_know_posts_tag_ct (tag_id, create_time),
     KEY ix_know_posts_top_ct (is_top, create_time),
     KEY ix_know_posts_creator_status_pub (creator_id, status, publish_time),
+    KEY ix_know_posts_rag_status (rag_index_status, update_time),
     CONSTRAINT fk_know_posts_creator FOREIGN KEY (creator_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

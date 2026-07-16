@@ -67,8 +67,47 @@
 
     <update id="publish">
         UPDATE know_posts
-        SET status = 'published', publish_time = NOW(), update_time = NOW()
+        SET status = 'published',
+            publish_time = NOW(),
+            update_time = NOW(),
+            rag_index_status = 'PENDING',
+            rag_index_error = NULL,
+            rag_index_chunk_count = 0,
+            rag_indexed_at = NULL
         WHERE id = #{id} AND creator_id = #{creatorId}
+    </update>
+
+    <update id="markRagIndexing">
+        UPDATE know_posts
+        SET rag_index_status = 'INDEXING', rag_index_error = NULL
+        WHERE id = #{id}
+    </update>
+
+    <update id="markRagIndexReady">
+        UPDATE know_posts
+        SET rag_index_status = 'READY',
+            rag_index_error = NULL,
+            rag_index_chunk_count = #{chunkCount},
+            rag_indexed_at = NOW()
+        WHERE id = #{id}
+    </update>
+
+    <update id="markRagIndexFailed">
+        UPDATE know_posts
+        SET rag_index_status = 'FAILED',
+            rag_index_error = #{error},
+            rag_index_chunk_count = 0,
+            rag_indexed_at = NULL
+        WHERE id = #{id}
+    </update>
+
+    <update id="markRagNotIndexed">
+        UPDATE know_posts
+        SET rag_index_status = 'NOT_INDEXED',
+            rag_index_error = NULL,
+            rag_index_chunk_count = 0,
+            rag_indexed_at = NULL
+        WHERE id = #{id}
     </update>
 
     <!-- 设置置顶 -->
@@ -151,7 +190,11 @@
             p.is_top AS isTop,
             p.visible,
             p.type,
-            p.status
+            p.status,
+            p.rag_index_status AS ragIndexStatus,
+            p.rag_index_error AS ragIndexError,
+            p.rag_index_chunk_count AS ragIndexChunkCount,
+            p.rag_indexed_at AS ragIndexedAt
         FROM know_posts p
         JOIN users u ON p.creator_id = u.id
         WHERE p.id = #{id}

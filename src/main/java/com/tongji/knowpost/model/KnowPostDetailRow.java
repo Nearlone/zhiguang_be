@@ -26,4 +26,8 @@ public class KnowPostDetailRow {
     private String visible;
     private String type;
     private String status;
+    private String ragIndexStatus;
+    private String ragIndexError;
+    private Integer ragIndexChunkCount;
+    private Instant ragIndexedAt;
 }

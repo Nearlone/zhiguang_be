@@ -66,8 +66,16 @@
   - 鉴权：需要携带 `Authorization: Bearer <access_token>`
   - 内容类型：`application/json`
   - 请求体：无
-  - 成功响应：`204 No Content`
-  - 行为：设置状态为 `published`，并写入 `publish_time` 为当前时间。
+  - 成功响应：`200 OK`
+    ```json
+    {
+      "postId": "335705124099985408",
+      "publishStatus": "PUBLISHED",
+      "ragIndexStatus": "PENDING",
+      "ragMessage": "知文已发布，AI问答正在排队准备"
+    }
+    ```
+  - 行为：提交发布事务并写入 Outbox 事件；RAG 消费者在事务提交后异步创建向量，向量失败不会回滚知文发布。
   - 可能错误：
     - `BAD_REQUEST`：草稿不存在或无权限（`id` 与当前用户不匹配）
 
@@ -440,16 +448,30 @@ N[注意：需在 OSS CORS 暴露 ETag] --- D
 #### 知文 RAG 索引重建
 
 - 路径：`POST /api/v1/knowposts/{id}/rag/reindex`
-  - 鉴权：建议限制为作者或管理员（部署时可加网关/鉴权策略）。
+  - 鉴权：必须登录且只能由知文作者调用。
   - 内容类型：`application/json`
   - 请求体：无
-  - 成功响应：返回整数，表示重建的切片数量，例如：
+  - 成功响应：返回结构化状态，例如：
     ```json
-    8
+    {
+      "postId": "335705124099985408",
+      "status": "READY",
+      "chunkCount": 47,
+      "indexedAt": "2026-07-15T17:50:00+08:00",
+      "message": "AI问答已就绪"
+    }
     ```
   - 行为：
     - 拉取该知文的正文（`contentUrl`），按片段策略切分并写入向量库。
-    - 仅当知文为“已发布 + 公开”时执行；否则返回 `0` 并写告警日志。
+    - 仅当知文为“已发布 + 公开”时执行；否则返回 `SKIPPED`。
+    - 单次 Embedding 最多提交 10 个切片，单篇知文最多建立 100 条向量。
+
+#### 查询 RAG 索引状态
+
+- 路径：`GET /api/v1/knowposts/{id}/rag/status`
+  - 鉴权：公开知文允许匿名查询；非公开知文仅作者可查询。
+  - 状态：`NOT_INDEXED`、`PENDING`、`INDEXING`、`READY`、`FAILED`。
+  - 用途：发布成功后前端可短轮询该接口；`READY` 时启用 AI 问答，`FAILED` 时展示 `message` 和重试入口。
 
 - 备注：
   - 向量库索引名来源于配置：`spring.ai.vectorstore.elasticsearch.index-name`（如：`zhiguang-ai-index`）。

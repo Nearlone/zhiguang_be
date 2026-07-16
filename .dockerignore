@@ -1,0 +1,21 @@
+target
+.git
+.idea
+.DS_Store
+*.iml
+*.iws
+*.ipr
+
+# Local-only configuration and secrets must never enter Docker build context.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.local-secrets
+deploy/secrets
+deploy/**/secrets
+src/main/resources/application-local.yml
+src/main/resources/application-*.local.yml
+!src/main/resources/application-local.example.yml
+src/main/resources/keys/private.pem
+src/main/resources/keys/*.private.pem

@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @RestController
@@ -26,6 +27,27 @@ import java.util.UUID;
 @Validated
 @RequiredArgsConstructor
 public class StorageController {
+
+    private static final Map<String, Set<String>> CONTENT_UPLOAD_TYPES = Map.of(
+            "text/markdown", Set.of(".md", ".markdown"),
+            "text/html", Set.of(".html"),
+            "text/plain", Set.of(".txt"),
+            "application/json", Set.of(".json")
+    );
+    private static final Map<String, Set<String>> IMAGE_UPLOAD_TYPES = Map.of(
+            "image/jpeg", Set.of(".jpg", ".jpeg"),
+            "image/png", Set.of(".png"),
+            "image/webp", Set.of(".webp")
+    );
+    private static final Map<String, String> DEFAULT_EXTENSIONS = Map.of(
+            "text/markdown", ".md",
+            "text/html", ".html",
+            "text/plain", ".txt",
+            "application/json", ".json",
+            "image/jpeg", ".jpg",
+            "image/png", ".png",
+            "image/webp", ".webp"
+    );
 
     private final OssStorageService ossStorageService;
     private final JwtService jwtService;
@@ -53,17 +75,18 @@ public class StorageController {
         }
 
         String scene = request.scene();
+        if (!"knowpost_content".equals(scene) && !"knowpost_image".equals(scene)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的上传场景");
+        }
         String objectKey;
         String ext = normalizeExt(request.ext(), request.contentType(), scene);
 
         if ("knowpost_content".equals(scene)) {
             objectKey = "posts/" + postId + "/content" + ext;
-        } else if ("knowpost_image".equals(scene)) {
+        } else {
             String date = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneId.of("UTC")).format(Instant.now());
             String rand = UUID.randomUUID().toString().replaceAll("-", "").substring(0, 8);
             objectKey = "posts/" + postId + "/images/" + date + "/" + rand + ext;
-        } else {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的上传场景");
         }
 
         int expiresIn = 600; // 10 分钟
@@ -72,25 +95,32 @@ public class StorageController {
         return new StoragePresignResponse(objectKey, putUrl, headers, expiresIn);
     }
 
-    private String normalizeExt(String ext, String contentType, String scene) {
-        if (ext != null && !ext.isBlank()) {
-            return ext.startsWith(".") ? ext : "." + ext;
-        }
+    String normalizeExt(String ext, String contentType, String scene) {
+        String normalizedType = contentType == null ? "" : contentType.trim().toLowerCase();
+        Map<String, Set<String>> allowedTypes;
         if ("knowpost_content".equals(scene)) {
-            return switch (contentType) {
-                case "text/markdown" -> ".md";
-                case "text/html" -> ".html";
-                case "text/plain" -> ".txt";
-                case "application/json" -> ".json";
-                default -> ".bin";
-            };
+            allowedTypes = CONTENT_UPLOAD_TYPES;
+        } else if ("knowpost_image".equals(scene)) {
+            allowedTypes = IMAGE_UPLOAD_TYPES;
         } else {
-            return switch (contentType) {
-                case "image/jpeg" -> ".jpg";
-                case "image/png" -> ".png";
-                case "image/webp" -> ".webp";
-                default -> ".img";
-            };
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的上传场景");
         }
+        Set<String> allowedExtensions = allowedTypes.get(normalizedType);
+        if (allowedExtensions == null) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的上传文件类型");
+        }
+
+        String normalizedExt = ext == null ? "" : ext.trim().toLowerCase();
+        if (normalizedExt.isBlank()) {
+            return DEFAULT_EXTENSIONS.get(normalizedType);
+        }
+        if (!normalizedExt.startsWith(".")) {
+            normalizedExt = "." + normalizedExt;
+        }
+        // 后端必须再次核对 MIME 与扩展名，不能只依赖可被绕过的前端 accept 属性。
+        if (!allowedExtensions.contains(normalizedExt)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "文件扩展名与 Content-Type 不匹配");
+        }
+        return normalizedExt;
     }
 }

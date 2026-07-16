@@ -12,10 +12,10 @@ import com.tongji.knowpost.mapper.KnowPostMapper;
 import com.tongji.knowpost.model.KnowPost;
 import com.tongji.knowpost.model.KnowPostDetailRow;
 import com.tongji.knowpost.api.dto.KnowPostDetailResponse;
+import com.tongji.knowpost.api.dto.KnowPostPublishResponse;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.tongji.counter.service.CounterService;
 import com.tongji.storage.config.OssProperties;
-import com.tongji.llm.rag.RagIndexService;
 import com.tongji.relation.outbox.OutboxMapper;
 import com.tongji.cache.hotkey.HotKeyDetector;
 import jakarta.annotation.Resource;
@@ -51,7 +51,6 @@ public class KnowPostServiceImpl implements KnowPostService {
     private static final Logger log = LoggerFactory.getLogger(KnowPostServiceImpl.class);
     private static final int DETAIL_LAYOUT_VER = 1;
     private final ConcurrentHashMap<String, Object> singleFlight = new ConcurrentHashMap<>();
-    private final RagIndexService ragIndexService;
     private final OutboxMapper outboxMapper;
 
     // 手动编写构造器，Spring的@Qualifier直接标注在参数上（核心）
@@ -65,7 +64,6 @@ public class KnowPostServiceImpl implements KnowPostService {
             StringRedisTemplate redis,
             @Qualifier("knowPostDetailCache") Cache<String, KnowPostDetailResponse> knowPostDetailCache,
             HotKeyDetector hotKey,
-            RagIndexService ragIndexService,
             OutboxMapper outboxMapper
     ) {
         this.mapper = mapper;
@@ -77,7 +75,6 @@ public class KnowPostServiceImpl implements KnowPostService {
         this.redis = redis;
         this.knowPostDetailCache = knowPostDetailCache; // 带@Qualifier的参数赋值
         this.hotKey = hotKey;
-        this.ragIndexService = ragIndexService;
         this.outboxMapper = outboxMapper;
     }
     /**
@@ -127,12 +124,6 @@ public class KnowPostServiceImpl implements KnowPostService {
 
         invalidateCache(id);
 
-        // 触发一次预索引（草稿阶段可能因可见性/状态被跳过）
-        try {
-            ragIndexService.ensureIndexed(id);
-        } catch (Exception e) {
-            log.warn("Pre-index after content confirm failed, post {}: {}", id, e.getMessage());
-        }
     }
 
     /**
@@ -178,31 +169,35 @@ public class KnowPostServiceImpl implements KnowPostService {
      * 发布草稿，设置状态与发布时间。
      */
     @Transactional
-    public void publish(long creatorId, long id) {
+    public KnowPostPublishResponse publish(long creatorId, long id) {
         int updated = mapper.publish(id, creatorId);
 
         if (updated == 0) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
+        // Outbox 与发布状态处于同一数据库事务；写事件失败时回滚，避免文章永久停留在 PENDING。
+        try {
+            long outId = idGen.nextId();
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "entity", "knowpost",
+                    "op", "upsert",
+                    "event", "KNOWPOST_PUBLISHED",
+                    "id", id));
+            int inserted = outboxMapper.insert(outId, "knowpost", id, "KnowPostPublished", payload);
+            requireOutboxInserted(inserted, id, "KnowPostPublished");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Create publish outbox payload failed", e);
+        }
+
         try {
             userCounterService.incrementPosts(creatorId, 1);
         } catch (Exception ignored) {}
 
-        // 写入 Outbox 事件，驱动搜索索引增量更新
-        try {
-            long outId = idGen.nextId();
-            String payload = objectMapper.writeValueAsString(Map.of("entity", "knowpost", "op", "upsert", "id", id));
-            outboxMapper.insert(outId, "knowpost", id, "KnowPostPublished", payload);
-        } catch (Exception e) {
-            log.warn("Outbox event after publish failed, post {}: {}", id, e.getMessage());
-        }
-
-        // 发布成功后触发一次预索引，减少首次问答冷启动
-        try {
-            ragIndexService.ensureIndexed(id);
-        } catch (Exception e) {
-            log.warn("Pre-index after publish failed, post {}: {}", id, e.getMessage());
-        }
+        return new KnowPostPublishResponse(
+                String.valueOf(id),
+                "PUBLISHED",
+                "PENDING",
+                "知文已发布，AI问答正在排队准备");
     }
 
     /**
@@ -238,6 +233,21 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
 
+        // 可见性变化会改变 RAG 资格：公开时异步确保索引，转私密时异步清理旧向量。
+        try {
+            long outId = idGen.nextId();
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "entity", "knowpost",
+                    "op", "upsert",
+                    "event", "KNOWPOST_VISIBILITY_CHANGED",
+                    "visible", visible,
+                    "id", id));
+            int inserted = outboxMapper.insert(outId, "knowpost", id, "KnowPostVisibilityChanged", payload);
+            requireOutboxInserted(inserted, id, "KnowPostVisibilityChanged");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Create visibility outbox payload failed", e);
+        }
+
         invalidateCache(id);
     }
 
@@ -253,13 +263,18 @@ public class KnowPostServiceImpl implements KnowPostService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "草稿不存在或无权限");
         }
 
-        // 写入 Outbox 事件，驱动搜索索引软删
+        // 删除事件同时驱动搜索软删与 RAG 向量清理，必须和状态更新处于同一事务。
         try {
             long outId = idGen.nextId();
-            String payload = objectMapper.writeValueAsString(Map.of("entity", "knowpost", "op", "delete", "id", id));
-            outboxMapper.insert(outId, "knowpost", id, "KnowPostDeleted", payload);
-        } catch (Exception e) {
-            log.warn("Outbox event after delete failed, post {}: {}", id, e.getMessage());
+            String payload = objectMapper.writeValueAsString(Map.of(
+                    "entity", "knowpost",
+                    "op", "delete",
+                    "event", "KNOWPOST_DELETED",
+                    "id", id));
+            int inserted = outboxMapper.insert(outId, "knowpost", id, "KnowPostDeleted", payload);
+            requireOutboxInserted(inserted, id, "KnowPostDeleted");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Create delete outbox payload failed", e);
         }
 
         invalidateCache(id);
@@ -274,6 +289,14 @@ public class KnowPostServiceImpl implements KnowPostService {
             case "public", "followers", "school", "private", "unlisted" -> true;
             default -> false;
         };
+    }
+
+    private void requireOutboxInserted(int inserted, long postId, String eventType) {
+        // 关键状态变更必须伴随事件落库；否则事务回滚，避免数据库状态与异步索引永久失联。
+        if (inserted != 1) {
+            throw new IllegalStateException(
+                    "Insert required outbox event failed: postId=" + postId + ", type=" + eventType);
+        }
     }
 
     private String toJsonOrNull(List<String> list) {

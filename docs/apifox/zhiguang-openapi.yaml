@@ -1,0 +1,2238 @@
+openapi: 3.0.3
+info:
+  title: 知光 Zhiguang 前后端联调 API
+  version: "1.0.0"
+  description: |
+    本文档根据当前后端源码整理，面向本地前后端联调与 Apifox 导入。
+
+    本地默认后端地址为 `http://localhost:8080`。除特别标注为公开接口外，接口都需要在请求头中携带：
+
+    `Authorization: Bearer <accessToken>`
+
+    认证流程建议：
+
+    1. 调用“发送验证码”。
+    2. 本地开发环境从后端日志或 Redis 读取验证码。
+    3. 调用“注册”或“登录”，拿到 `accessToken` 和 `refreshToken`。
+    4. 在 Apifox 环境变量中配置 `accessToken`、`refreshToken`、`postId`、`targetUserId` 等变量。
+
+servers:
+  - url: http://localhost:8080
+    description: 本地 Spring Boot 后端
+
+tags:
+  - name: Health
+    description: 服务健康检查
+  - name: Auth
+    description: 注册、登录、刷新令牌、登出、当前用户
+  - name: KnowPost
+    description: 知文草稿、发布、详情、Feed
+  - name: Storage
+    description: OSS 直传预签名
+  - name: Profile
+    description: 个人资料与头像
+  - name: Search
+    description: 搜索与联想
+  - name: Counter
+    description: 点赞、收藏与计数读取
+  - name: Relation
+    description: 关注、粉丝、关系状态与用户计数
+  - name: AI/RAG
+    description: 大模型描述生成与单篇知文 RAG 问答
+
+paths:
+  /actuator/health:
+    get:
+      tags:
+        - Health
+      summary: 健康检查
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: 服务可用
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                up:
+                  summary: 健康
+                  value:
+                    status: UP
+
+  /actuator/info:
+    get:
+      tags:
+        - Health
+      summary: 服务信息
+      operationId: getInfo
+      security: []
+      responses:
+        "200":
+          description: 服务信息
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+              examples:
+                empty:
+                  summary: 默认空对象
+                  value: {}
+
+  /api/v1/auth/send-code:
+    post:
+      tags:
+        - Auth
+      summary: 发送验证码
+      description: |
+        根据场景发送验证码。
+
+        业务规则：
+
+        - `REGISTER`：账号必须不存在。
+        - `LOGIN`、`RESET_PASSWORD`：账号必须已存在。
+        - 手机号格式为中国大陆 11 位手机号，以 `1` 开头。
+        - 邮箱会转为小写后处理。
+      operationId: sendAuthCode
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendCodeRequest"
+            examples:
+              registerByPhone:
+                summary: 注册手机号验证码
+                value:
+                  scene: REGISTER
+                  identifierType: PHONE
+                  identifier: "13800000001"
+              loginByPhone:
+                summary: 登录手机号验证码
+                value:
+                  scene: LOGIN
+                  identifierType: PHONE
+                  identifier: "13800000001"
+              resetByEmail:
+                summary: 邮箱重置密码验证码
+                value:
+                  scene: RESET_PASSWORD
+                  identifierType: EMAIL
+                  identifier: "student@example.com"
+      responses:
+        "200":
+          description: 验证码发送成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendCodeResponse"
+              examples:
+                register:
+                  value:
+                    identifier: "13800000001"
+                    scene: REGISTER
+                    expireSeconds: 300
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/register:
+    post:
+      tags:
+        - Auth
+      summary: 注册并自动登录
+      description: |
+        验证注册验证码后创建用户，成功后直接返回用户信息与 token 对。
+
+        本地验证码可以从后端控制台日志读取，也可以从 Redis 读取：
+
+        `docker exec zhiguang-redis redis-cli HGET auth:code:REGISTER:13800000001 code`
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+            examples:
+              phone:
+                summary: 手机号注册
+                value:
+                  identifierType: PHONE
+                  identifier: "13800000001"
+                  code: "123456"
+                  password: "Test123456"
+                  agreeTerms: true
+              email:
+                summary: 邮箱注册
+                value:
+                  identifierType: EMAIL
+                  identifier: "student@example.com"
+                  code: "123456"
+                  password: "Test123456"
+                  agreeTerms: true
+      responses:
+        "200":
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/AuthSuccess"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Auth
+      summary: 登录
+      description: |
+        支持密码登录或验证码登录。`password` 与 `code` 二选一，优先走密码登录。
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            examples:
+              password:
+                summary: 密码登录
+                value:
+                  identifierType: PHONE
+                  identifier: "13800000001"
+                  password: "Test123456"
+              code:
+                summary: 验证码登录
+                value:
+                  identifierType: PHONE
+                  identifier: "13800000001"
+                  code: "123456"
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/AuthSuccess"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/token/refresh:
+    post:
+      tags:
+        - Auth
+      summary: 刷新令牌
+      description: |
+        使用 refresh token 获取新的 access token 和 refresh token。旧 refresh token 会被撤销。
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRefreshRequest"
+            examples:
+              default:
+                value:
+                  refreshToken: "{{refreshToken}}"
+      responses:
+        "200":
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/TokenSuccess"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/logout:
+    post:
+      tags:
+        - Auth
+      summary: 登出
+      description: |
+        撤销指定 refresh token。该接口在安全配置中是公开接口，不需要 Bearer，但请求体必须提供 refresh token。
+      operationId: logout
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+            examples:
+              default:
+                value:
+                  refreshToken: "{{refreshToken}}"
+      responses:
+        "204":
+          description: 登出成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/password/reset:
+    post:
+      tags:
+        - Auth
+      summary: 重置密码
+      description: |
+        使用 `RESET_PASSWORD` 场景验证码重置密码。成功后会撤销该用户所有 refresh token。
+      operationId: resetPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequest"
+            examples:
+              phone:
+                value:
+                  identifierType: PHONE
+                  identifier: "13800000001"
+                  code: "123456"
+                  newPassword: "NewTest123456"
+      responses:
+        "204":
+          description: 重置成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/auth/me:
+    get:
+      tags:
+        - Auth
+      summary: 查询当前登录用户
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 当前用户信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUserResponse"
+              examples:
+                current:
+                  value:
+                    id: 100
+                    nickname: 知光用户abcd1234
+                    avatar: https://static.zhiguang.cn/default-avatar.png
+                    phone: "13800000001"
+                    zhId: null
+                    birthday: null
+                    school: 同济大学
+                    bio: AI 应用工程师实习准备中
+                    gender: UNKNOWN
+                    tagJson: "[]"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/drafts:
+    post:
+      tags:
+        - KnowPost
+      summary: 创建知文草稿
+      description: 创建空草稿，默认类型为 `image_text`，默认可见性为 `public`，返回新草稿 ID。
+      operationId: createKnowPostDraft
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 草稿创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowPostDraftCreateResponse"
+              examples:
+                success:
+                  value:
+                    id: "1950000000000000000"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/content/confirm:
+    post:
+      tags:
+        - KnowPost
+      summary: 确认知文正文上传
+      description: 前端通过 OSS 预签名 URL 上传正文后，回传对象存储信息，后端保存 `contentUrl`。
+      operationId: confirmKnowPostContent
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowPostContentConfirmRequest"
+            examples:
+              markdown:
+                value:
+                  objectKey: posts/1950000000000000000/content.md
+                  etag: "9b2cf535f27731c974343645a3985328"
+                  size: 2048
+                  sha256: b94d27b9934d3e08a52e52d7da7dabfadeadbeef1234567890abcdef12345678
+      responses:
+        "204":
+          description: 确认成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}:
+    patch:
+      tags:
+        - KnowPost
+      summary: 更新知文元数据
+      description: |
+        局部更新标题、标签、封面图片、可见性、置顶状态、简介等元数据。
+
+        `visible` 支持：`public`、`followers`、`school`、`private`、`unlisted`。
+      operationId: patchKnowPostMetadata
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowPostPatchRequest"
+            examples:
+              full:
+                value:
+                  title: Spring Security JWT 认证链路总结
+                  tagId: 1
+                  tags:
+                    - Java
+                    - Spring Security
+                    - JWT
+                  imgUrls:
+                    - https://cdn.zhiguang.cn/posts/1950000000000000000/images/cover.png
+                  visible: public
+                  isTop: false
+                  description: 从过滤链到 Resource Server 的完整认证链路
+              partial:
+                value:
+                  title: 更新后的标题
+                  description: 更新后的简介
+      responses:
+        "204":
+          description: 更新成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags:
+        - KnowPost
+      summary: 删除知文
+      description: 软删除知文，仅作者本人可操作。
+      operationId: deleteKnowPost
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      responses:
+        "204":
+          description: 删除成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/publish:
+    post:
+      tags:
+        - KnowPost
+      summary: 发布知文
+      description: 将知文置为 `published`，并通过 Outbox 异步创建 RAG 索引；向量失败不会回滚发布。
+      operationId: publishKnowPost
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      responses:
+        "200":
+          description: 发布成功，RAG 索引进入排队状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowPostPublishResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/top:
+    patch:
+      tags:
+        - KnowPost
+      summary: 设置知文置顶状态
+      operationId: patchKnowPostTop
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowPostTopPatchRequest"
+            examples:
+              top:
+                value:
+                  isTop: true
+              cancelTop:
+                value:
+                  isTop: false
+      responses:
+        "204":
+          description: 更新成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/visibility:
+    patch:
+      tags:
+        - KnowPost
+      summary: 设置知文可见性
+      operationId: patchKnowPostVisibility
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowPostVisibilityPatchRequest"
+            examples:
+              public:
+                value:
+                  visible: public
+              private:
+                value:
+                  visible: private
+      responses:
+        "204":
+          description: 更新成功，无响应体
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/feed:
+    get:
+      tags:
+        - KnowPost
+      summary: 首页公开 Feed
+      description: |
+        公开接口。查询公开、已发布知文。可不带 token；如果携带 Bearer token，返回项中的 `liked`、`faved` 可体现当前用户状态。
+      operationId: getPublicFeed
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+          example: 20
+      responses:
+        "200":
+          description: Feed 分页结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedPageResponse"
+              examples:
+                list:
+                  $ref: "#/components/examples/FeedPage"
+
+  /api/v1/knowposts/mine:
+    get:
+      tags:
+        - KnowPost
+      summary: 我的已发布知文
+      operationId: getMyKnowPosts
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+          example: 20
+      responses:
+        "200":
+          description: 我的知文分页结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedPageResponse"
+              examples:
+                list:
+                  $ref: "#/components/examples/FeedPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/detail/{id}:
+    get:
+      tags:
+        - KnowPost
+      summary: 知文详情
+      description: |
+        公开接口。公开已发布内容可匿名访问；非公开内容需要作者本人身份，服务层会做权限判断。
+      operationId: getKnowPostDetail
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      responses:
+        "200":
+          description: 知文详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowPostDetailResponse"
+              examples:
+                detail:
+                  $ref: "#/components/examples/KnowPostDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/knowposts/description/suggest:
+    post:
+      tags:
+        - AI/RAG
+      summary: 生成知文简介
+      description: 调用大模型，根据正文生成不超过 50 字的知文描述。需要鉴权。
+      operationId: suggestKnowPostDescription
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DescriptionSuggestRequest"
+            examples:
+              markdown:
+                value:
+                  content: "# JWT 认证系统\n\n本文总结 Access Token、Refresh Token、过滤链与 Redis 白名单的设计。"
+      responses:
+        "200":
+          description: 简介生成成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DescriptionSuggestResponse"
+              examples:
+                success:
+                  value:
+                    description: JWT 与刷新令牌的认证链路总结
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/qa/stream:
+    get:
+      tags:
+        - AI/RAG
+      summary: 单篇知文 RAG 流式问答
+      description: |
+        公开接口，返回 `text/event-stream`。后端会确保该知文被索引，然后基于向量召回上下文进行流式回答。
+      operationId: streamKnowPostQa
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+        - name: question
+          in: query
+          required: true
+          schema:
+            type: string
+          example: 这篇文章里 Refresh Token 为什么要放 Redis？
+        - name: topK
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 5
+            minimum: 1
+          example: 5
+        - name: maxTokens
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1024
+            minimum: 1
+          example: 1024
+      responses:
+        "200":
+          description: SSE 流式回答
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stream:
+                  value: |
+                    data: Refresh Token 放 Redis 主要是为了支持服务端撤销和 TTL 管理。
+
+                    data: 这样登出、重置密码、令牌轮换时可以立即让旧 token 失效。
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/knowposts/{id}/rag/reindex:
+    post:
+      tags:
+        - AI/RAG
+      summary: 手动重建单篇知文向量索引
+      description: 需要鉴权且仅作者可调用。返回结构化索引状态。
+      operationId: reindexKnowPostRag
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      responses:
+        "200":
+          description: 重建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RagIndexStatusResponse"
+              examples:
+                success:
+                  value:
+                    postId: "335705124099985408"
+                    status: READY
+                    chunkCount: 47
+                    indexedAt: "2026-07-15T17:50:00+08:00"
+                    message: AI问答已就绪
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/knowposts/{id}/rag/status:
+    get:
+      tags:
+        - AI/RAG
+      summary: 查询单篇知文 RAG 索引状态
+      description: 公开知文允许匿名查询；非公开知文仅作者可查询。
+      operationId: getKnowPostRagStatus
+      parameters:
+        - $ref: "#/components/parameters/KnowPostId"
+      responses:
+        "200":
+          description: 当前索引状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RagIndexStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/storage/presign:
+    post:
+      tags:
+        - Storage
+      summary: 获取 OSS 直传预签名 URL
+      description: |
+        前端先创建草稿，再调用本接口获取 PUT 预签名 URL。后端会校验 `postId` 是否属于当前用户。
+
+        `scene` 支持：
+
+        - `knowpost_content`：正文文件。
+        - `knowpost_image`：图片文件。
+      operationId: createStoragePresign
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StoragePresignRequest"
+            examples:
+              content:
+                summary: 正文 Markdown
+                value:
+                  scene: knowpost_content
+                  postId: "{{postId}}"
+                  contentType: text/markdown
+                  ext: md
+              image:
+                summary: 知文图片
+                value:
+                  scene: knowpost_image
+                  postId: "{{postId}}"
+                  contentType: image/png
+                  ext: png
+      responses:
+        "200":
+          description: 预签名 URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoragePresignResponse"
+              examples:
+                content:
+                  value:
+                    objectKey: posts/1950000000000000000/content.md
+                    putUrl: https://oss-cn-beijing.aliyuncs.com/bucket/posts/1950000000000000000/content.md?Expires=...
+                    headers:
+                      Content-Type: text/markdown
+                    expiresIn: 600
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/profile:
+    patch:
+      tags:
+        - Profile
+      summary: 更新个人资料
+      description: 局部更新当前登录用户资料。未传字段保持不变。
+      operationId: patchProfile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfilePatchRequest"
+            examples:
+              full:
+                value:
+                  nickname: 宋同学
+                  bio: AI 应用工程师实习准备中
+                  gender: UNKNOWN
+                  birthday: "2002-01-01"
+                  zgId: song_ai_2026
+                  school: 同济大学
+                  tagJson: "[\"Java\",\"AI应用\",\"RAG\"]"
+              partial:
+                value:
+                  nickname: 新昵称
+                  bio: 更新个人简介
+      responses:
+        "200":
+          description: 更新后的资料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/Profile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/profile/avatar:
+    post:
+      tags:
+        - Profile
+      summary: 上传头像
+      description: multipart/form-data 上传头像文件，字段名固定为 `file`。
+      operationId: uploadAvatar
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 头像图片文件
+      responses:
+        "200":
+          description: 更新后的资料
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+              examples:
+                success:
+                  $ref: "#/components/examples/Profile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/search:
+    get:
+      tags:
+        - Search
+      summary: 关键词搜索
+      description: |
+        根据关键词检索已发布内容，支持标签过滤和游标分页。当前安全配置下该接口需要鉴权。
+      operationId: searchKnowPosts
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          example: JWT
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+          example: 10
+        - name: tags
+          in: query
+          required: false
+          description: 逗号分隔的标签过滤
+          schema:
+            type: string
+          example: Java,Spring Security
+        - name: after
+          in: query
+          required: false
+          description: 上一页返回的 Base64URL 游标
+          schema:
+            type: string
+          example: null
+      responses:
+        "200":
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                result:
+                  value:
+                    items:
+                      - id: "1950000000000000000"
+                        title: Spring Security JWT 认证链路总结
+                        description: 从过滤链到 Resource Server 的完整认证链路
+                        coverImage: https://cdn.zhiguang.cn/posts/1950000000000000000/images/cover.png
+                        tags:
+                          - Java
+                          - JWT
+                        authorAvatar: https://static.zhiguang.cn/default-avatar.png
+                        authorNickname: 宋同学
+                        tagJson: "[\"Java\",\"AI应用\"]"
+                        likeCount: 12
+                        favoriteCount: 3
+                        liked: false
+                        faved: false
+                        isTop: false
+                    nextAfter: eyJwdWJsaXNoVGltZSI6IjIwMjYtMDctMTJUMTA6MDA6MDBaIn0
+                    hasMore: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/search/suggest:
+    get:
+      tags:
+        - Search
+      summary: 搜索联想建议
+      operationId: suggestSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: prefix
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          example: Spr
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+          example: 10
+      responses:
+        "200":
+          description: 联想建议
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+              examples:
+                result:
+                  value:
+                    items:
+                      - Spring Security JWT 认证链路总结
+                      - Spring AI RAG 实战
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/action/like:
+    post:
+      tags:
+        - Counter
+      summary: 点赞
+      operationId: likeEntity
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/ActionRequestBody"
+      responses:
+        "200":
+          description: 点赞结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LikeActionResponse"
+              examples:
+                changed:
+                  value:
+                    changed: true
+                    liked: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/action/unlike:
+    post:
+      tags:
+        - Counter
+      summary: 取消点赞
+      operationId: unlikeEntity
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/ActionRequestBody"
+      responses:
+        "200":
+          description: 取消点赞结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LikeActionResponse"
+              examples:
+                changed:
+                  value:
+                    changed: true
+                    liked: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/action/fav:
+    post:
+      tags:
+        - Counter
+      summary: 收藏
+      operationId: favEntity
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/ActionRequestBody"
+      responses:
+        "200":
+          description: 收藏结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FavActionResponse"
+              examples:
+                changed:
+                  value:
+                    changed: true
+                    faved: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/action/unfav:
+    post:
+      tags:
+        - Counter
+      summary: 取消收藏
+      operationId: unfavEntity
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/ActionRequestBody"
+      responses:
+        "200":
+          description: 取消收藏结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FavActionResponse"
+              examples:
+                changed:
+                  value:
+                    changed: true
+                    faved: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/counter/{etype}/{eid}:
+    get:
+      tags:
+        - Counter
+      summary: 查询实体计数
+      description: 指标目前支持 `like`、`fav`。不传 `metrics` 时返回所有支持指标。
+      operationId: getEntityCounts
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: etype
+          in: path
+          required: true
+          schema:
+            type: string
+          example: knowpost
+        - name: eid
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "{{postId}}"
+        - name: metrics
+          in: query
+          required: false
+          description: 逗号分隔指标，未知指标会被过滤
+          schema:
+            type: string
+          example: like,fav
+      responses:
+        "200":
+          description: 计数结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CountsResponse"
+              examples:
+                counts:
+                  value:
+                    entityType: knowpost
+                    entityId: "1950000000000000000"
+                    counts:
+                      like: 12
+                      fav: 3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/follow:
+    post:
+      tags:
+        - Relation
+      summary: 关注用户
+      operationId: followUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ToUserId"
+      responses:
+        "200":
+          description: 是否关注成功
+          content:
+            application/json:
+              schema:
+                type: boolean
+              examples:
+                success:
+                  value: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/unfollow:
+    post:
+      tags:
+        - Relation
+      summary: 取消关注用户
+      operationId: unfollowUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ToUserId"
+      responses:
+        "200":
+          description: 是否取消成功
+          content:
+            application/json:
+              schema:
+                type: boolean
+              examples:
+                success:
+                  value: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/status:
+    get:
+      tags:
+        - Relation
+      summary: 查询与目标用户的关系状态
+      operationId: getRelationStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ToUserId"
+      responses:
+        "200":
+          description: 关系三态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelationStatusResponse"
+              examples:
+                mutual:
+                  value:
+                    following: true
+                    followedBy: true
+                    mutual: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/following:
+    get:
+      tags:
+        - Relation
+      summary: 查询关注列表
+      description: 支持偏移分页或游标分页。返回用户资料列表。
+      operationId: getFollowingProfiles
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: 关注用户资料列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProfileResponse"
+              examples:
+                list:
+                  value:
+                    - id: 101
+                      nickname: 目标用户
+                      avatar: https://static.zhiguang.cn/default-avatar.png
+                      bio: RAG 学习中
+                      zgId: target_user
+                      gender: UNKNOWN
+                      birthday: null
+                      school: 同济大学
+                      phone: "13800000002"
+                      email: null
+                      tagJson: "[]"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/followers:
+    get:
+      tags:
+        - Relation
+      summary: 查询粉丝列表
+      description: 支持偏移分页或游标分页。返回用户资料列表。
+      operationId: getFollowerProfiles
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: 粉丝用户资料列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProfileResponse"
+              examples:
+                list:
+                  value:
+                    - id: 100
+                      nickname: 宋同学
+                      avatar: https://static.zhiguang.cn/default-avatar.png
+                      bio: AI 应用工程师实习准备中
+                      zgId: song_ai_2026
+                      gender: UNKNOWN
+                      birthday: "2002-01-01"
+                      school: 同济大学
+                      phone: "13800000001"
+                      email: null
+                      tagJson: "[\"Java\",\"AI应用\",\"RAG\"]"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/relation/counter:
+    get:
+      tags:
+        - Relation
+      summary: 查询用户维度计数
+      description: 从 Redis SDS 读取用户关注数、粉丝数、发文数、获赞数、获藏数；缺失时会尝试重建。
+      operationId: getUserCounter
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 用户计数
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserCounterResponse"
+              examples:
+                counts:
+                  value:
+                    followings: 5
+                    followers: 8
+                    posts: 3
+                    likedPosts: 42
+                    favedPosts: 10
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 登录或注册成功后返回的 accessToken。
+
+  parameters:
+    KnowPostId:
+      name: id
+      in: path
+      required: true
+      description: 知文 ID。源码中接收 long，文档示例按字符串展示以避免前端大整数精度问题。
+      schema:
+        type: string
+        pattern: "^\\d+$"
+      example: "{{postId}}"
+    ToUserId:
+      name: toUserId
+      in: query
+      required: true
+      description: 目标用户 ID
+      schema:
+        type: integer
+        format: int64
+      example: "{{targetUserId}}"
+    UserId:
+      name: userId
+      in: query
+      required: true
+      description: 用户 ID
+      schema:
+        type: integer
+        format: int64
+      example: "{{userId}}"
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      example: 20
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      example: 0
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: 游标，毫秒时间戳；传入时优先走游标分页。
+      schema:
+        type: integer
+        format: int64
+      example: 1720752000000
+
+  requestBodies:
+    ActionRequestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ActionRequest"
+          examples:
+            knowpost:
+              value:
+                entityType: knowpost
+                entityId: "{{postId}}"
+
+  responses:
+    BadRequest:
+      description: 业务异常或参数校验失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            badRequest:
+              value:
+                code: BAD_REQUEST
+                message: 请求参数错误
+            identifierExists:
+              value:
+                code: IDENTIFIER_EXISTS
+                message: 账号已存在
+            invalidCredentials:
+              value:
+                code: INVALID_CREDENTIALS
+                message: 登录凭证错误
+    Unauthorized:
+      description: 未认证或 Bearer JWT 无效/过期
+
+  examples:
+    TokenSuccess:
+      value:
+        accessToken: eyJhbGciOiJSUzI1NiIsImtpZCI6InpoaWd1YW5nLWtleSJ9.xxx.yyy
+        accessTokenExpiresAt: "2026-07-12T10:15:00Z"
+        refreshToken: eyJhbGciOiJSUzI1NiIsImtpZCI6InpoaWd1YW5nLWtleSJ9.rrr.sss
+        refreshTokenExpiresAt: "2026-07-19T10:00:00Z"
+    AuthSuccess:
+      value:
+        user:
+          id: 100
+          nickname: 知光用户abcd1234
+          avatar: https://static.zhiguang.cn/default-avatar.png
+          phone: "13800000001"
+          zhId: null
+          birthday: null
+          school: null
+          bio: null
+          gender: null
+          tagJson: "[]"
+        token:
+          accessToken: eyJhbGciOiJSUzI1NiIsImtpZCI6InpoaWd1YW5nLWtleSJ9.xxx.yyy
+          accessTokenExpiresAt: "2026-07-12T10:15:00Z"
+          refreshToken: eyJhbGciOiJSUzI1NiIsImtpZCI6InpoaWd1YW5nLWtleSJ9.rrr.sss
+          refreshTokenExpiresAt: "2026-07-19T10:00:00Z"
+    Profile:
+      value:
+        id: 100
+        nickname: 宋同学
+        avatar: https://static.zhiguang.cn/default-avatar.png
+        bio: AI 应用工程师实习准备中
+        zgId: song_ai_2026
+        gender: UNKNOWN
+        birthday: "2002-01-01"
+        school: 同济大学
+        phone: "13800000001"
+        email: null
+        tagJson: "[\"Java\",\"AI应用\",\"RAG\"]"
+    FeedPage:
+      value:
+        items:
+          - id: "1950000000000000000"
+            title: Spring Security JWT 认证链路总结
+            description: 从过滤链到 Resource Server 的完整认证链路
+            coverImage: https://cdn.zhiguang.cn/posts/1950000000000000000/images/cover.png
+            tags:
+              - Java
+              - JWT
+            authorAvatar: https://static.zhiguang.cn/default-avatar.png
+            authorNickname: 宋同学
+            tagJson: "[\"Java\",\"AI应用\"]"
+            likeCount: 12
+            favoriteCount: 3
+            liked: false
+            faved: false
+            isTop: false
+        page: 1
+        size: 20
+        hasMore: false
+    KnowPostDetail:
+      value:
+        id: "1950000000000000000"
+        title: Spring Security JWT 认证链路总结
+        description: 从过滤链到 Resource Server 的完整认证链路
+        contentUrl: https://cdn.zhiguang.cn/posts/1950000000000000000/content.md
+        images:
+          - https://cdn.zhiguang.cn/posts/1950000000000000000/images/cover.png
+        tags:
+          - Java
+          - Spring Security
+          - JWT
+        authorId: "100"
+        authorAvatar: https://static.zhiguang.cn/default-avatar.png
+        authorNickname: 宋同学
+        authorTagJson: "[\"Java\",\"AI应用\"]"
+        likeCount: 12
+        favoriteCount: 3
+        liked: false
+        faved: false
+        isTop: false
+        visible: public
+        type: image_text
+        publishTime: "2026-07-12T10:00:00Z"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          enum:
+            - IDENTIFIER_EXISTS
+            - IDENTIFIER_NOT_FOUND
+            - ZGID_EXISTS
+            - VERIFICATION_RATE_LIMIT
+            - VERIFICATION_DAILY_LIMIT
+            - VERIFICATION_NOT_FOUND
+            - VERIFICATION_MISMATCH
+            - VERIFICATION_TOO_MANY_ATTEMPTS
+            - INVALID_CREDENTIALS
+            - PASSWORD_POLICY_VIOLATION
+            - TERMS_NOT_ACCEPTED
+            - REFRESH_TOKEN_INVALID
+            - BAD_REQUEST
+            - INTERNAL_ERROR
+        message:
+          type: string
+
+    IdentifierType:
+      type: string
+      enum:
+        - PHONE
+        - EMAIL
+
+    VerificationScene:
+      type: string
+      enum:
+        - REGISTER
+        - LOGIN
+        - RESET_PASSWORD
+
+    Visible:
+      type: string
+      enum:
+        - public
+        - followers
+        - school
+        - private
+        - unlisted
+
+    SendCodeRequest:
+      type: object
+      required:
+        - scene
+        - identifierType
+        - identifier
+      properties:
+        scene:
+          $ref: "#/components/schemas/VerificationScene"
+        identifierType:
+          $ref: "#/components/schemas/IdentifierType"
+        identifier:
+          type: string
+          description: 手机号或邮箱
+
+    SendCodeResponse:
+      type: object
+      required:
+        - identifier
+        - scene
+        - expireSeconds
+      properties:
+        identifier:
+          type: string
+        scene:
+          $ref: "#/components/schemas/VerificationScene"
+        expireSeconds:
+          type: integer
+          format: int32
+          example: 300
+
+    RegisterRequest:
+      type: object
+      required:
+        - identifierType
+        - identifier
+        - code
+        - agreeTerms
+      properties:
+        identifierType:
+          $ref: "#/components/schemas/IdentifierType"
+        identifier:
+          type: string
+        code:
+          type: string
+        password:
+          type: string
+          description: 可选；提供时至少 8 位，且必须包含字母和数字。
+          minLength: 8
+        agreeTerms:
+          type: boolean
+          description: 必须为 true。
+
+    LoginRequest:
+      type: object
+      required:
+        - identifierType
+        - identifier
+      properties:
+        identifierType:
+          $ref: "#/components/schemas/IdentifierType"
+        identifier:
+          type: string
+        code:
+          type: string
+          description: 验证码登录时填写。
+        password:
+          type: string
+          description: 密码登录时填写。
+
+    TokenRefreshRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+
+    LogoutRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+
+    PasswordResetRequest:
+      type: object
+      required:
+        - identifierType
+        - identifier
+        - code
+        - newPassword
+      properties:
+        identifierType:
+          $ref: "#/components/schemas/IdentifierType"
+        identifier:
+          type: string
+        code:
+          type: string
+        newPassword:
+          type: string
+          minLength: 8
+          description: 至少 8 位，且必须包含字母和数字。
+
+    TokenResponse:
+      type: object
+      required:
+        - accessToken
+        - accessTokenExpiresAt
+        - refreshToken
+        - refreshTokenExpiresAt
+      properties:
+        accessToken:
+          type: string
+        accessTokenExpiresAt:
+          type: string
+          format: date-time
+          description: 默认 15 分钟后过期。
+        refreshToken:
+          type: string
+        refreshTokenExpiresAt:
+          type: string
+          format: date-time
+          description: 默认 7 天后过期。
+
+    AuthUserResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        nickname:
+          type: string
+        avatar:
+          type: string
+          format: uri
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        zhId:
+          type: string
+          nullable: true
+          description: 认证响应字段名为 zhId；个人资料响应字段名为 zgId。
+        birthday:
+          type: string
+          format: date
+          nullable: true
+        school:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        gender:
+          type: string
+          nullable: true
+        tagJson:
+          type: string
+          nullable: true
+
+    AuthResponse:
+      type: object
+      required:
+        - user
+        - token
+      properties:
+        user:
+          $ref: "#/components/schemas/AuthUserResponse"
+        token:
+          $ref: "#/components/schemas/TokenResponse"
+
+    KnowPostDraftCreateResponse:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: 新草稿 ID。
+
+    KnowPostPublishResponse:
+      type: object
+      required:
+        - postId
+        - publishStatus
+        - ragIndexStatus
+        - ragMessage
+      properties:
+        postId:
+          type: string
+        publishStatus:
+          type: string
+          enum: [PUBLISHED]
+        ragIndexStatus:
+          type: string
+          enum: [PENDING]
+        ragMessage:
+          type: string
+
+    RagIndexStatusResponse:
+      type: object
+      required:
+        - postId
+        - status
+        - chunkCount
+        - message
+      properties:
+        postId:
+          type: string
+        status:
+          type: string
+          enum: [NOT_INDEXED, PENDING, INDEXING, READY, FAILED, SKIPPED]
+        chunkCount:
+          type: integer
+          format: int32
+        indexedAt:
+          type: string
+          format: date-time
+          nullable: true
+        message:
+          type: string
+
+    KnowPostContentConfirmRequest:
+      type: object
+      required:
+        - objectKey
+        - etag
+        - size
+        - sha256
+      properties:
+        objectKey:
+          type: string
+        etag:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+
+    KnowPostPatchRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        tagId:
+          type: integer
+          format: int64
+          nullable: true
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+        imgUrls:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uri
+        visible:
+          $ref: "#/components/schemas/Visible"
+        isTop:
+          type: boolean
+        description:
+          type: string
+
+    KnowPostTopPatchRequest:
+      type: object
+      required:
+        - isTop
+      properties:
+        isTop:
+          type: boolean
+
+    KnowPostVisibilityPatchRequest:
+      type: object
+      required:
+        - visible
+      properties:
+        visible:
+          $ref: "#/components/schemas/Visible"
+
+    FeedItemResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        coverImage:
+          type: string
+          format: uri
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        authorAvatar:
+          type: string
+          nullable: true
+        authorNickname:
+          type: string
+          nullable: true
+        tagJson:
+          type: string
+          nullable: true
+        likeCount:
+          type: integer
+          format: int64
+        favoriteCount:
+          type: integer
+          format: int64
+        liked:
+          type: boolean
+          nullable: true
+        faved:
+          type: boolean
+          nullable: true
+        isTop:
+          type: boolean
+          nullable: true
+
+    FeedPageResponse:
+      type: object
+      required:
+        - items
+        - page
+        - size
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedItemResponse"
+        page:
+          type: integer
+        size:
+          type: integer
+        hasMore:
+          type: boolean
+
+    KnowPostDetailResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        contentUrl:
+          type: string
+          format: uri
+          nullable: true
+        images:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        authorId:
+          type: string
+        authorAvatar:
+          type: string
+          nullable: true
+        authorNickname:
+          type: string
+          nullable: true
+        authorTagJson:
+          type: string
+          nullable: true
+        likeCount:
+          type: integer
+          format: int64
+        favoriteCount:
+          type: integer
+          format: int64
+        liked:
+          type: boolean
+          nullable: true
+        faved:
+          type: boolean
+          nullable: true
+        isTop:
+          type: boolean
+          nullable: true
+        visible:
+          $ref: "#/components/schemas/Visible"
+        type:
+          type: string
+          example: image_text
+        publishTime:
+          type: string
+          format: date-time
+          nullable: true
+
+    DescriptionSuggestRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+
+    DescriptionSuggestResponse:
+      type: object
+      properties:
+        description:
+          type: string
+
+    StoragePresignRequest:
+      type: object
+      required:
+        - scene
+        - postId
+        - contentType
+      properties:
+        scene:
+          type: string
+          enum:
+            - knowpost_content
+            - knowpost_image
+        postId:
+          type: string
+        contentType:
+          type: string
+          example: text/markdown
+        ext:
+          type: string
+          nullable: true
+          description: 可传 `md` 或 `.md`，后端会补点号。
+
+    StoragePresignResponse:
+      type: object
+      properties:
+        objectKey:
+          type: string
+        putUrl:
+          type: string
+          format: uri
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        expiresIn:
+          type: integer
+          format: int32
+          example: 600
+
+    ProfilePatchRequest:
+      type: object
+      properties:
+        nickname:
+          type: string
+          minLength: 1
+          maxLength: 64
+        bio:
+          type: string
+          maxLength: 512
+        gender:
+          type: string
+          pattern: "(?i)MALE|FEMALE|OTHER|UNKNOWN"
+          example: UNKNOWN
+        birthday:
+          type: string
+          format: date
+          description: 不能晚于今天。
+        zgId:
+          type: string
+          pattern: "^[a-zA-Z0-9_]{4,32}$"
+        school:
+          type: string
+          maxLength: 128
+        tagJson:
+          type: string
+          description: JSON 字符串，例如 `[\"Java\",\"AI应用\"]`。
+
+    ProfileResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        nickname:
+          type: string
+        avatar:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        zgId:
+          type: string
+          nullable: true
+        gender:
+          type: string
+          nullable: true
+        birthday:
+          type: string
+          format: date
+          nullable: true
+        school:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        tagJson:
+          type: string
+          nullable: true
+
+    SearchResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedItemResponse"
+        nextAfter:
+          type: string
+          nullable: true
+        hasMore:
+          type: boolean
+
+    SuggestResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: string
+
+    ActionRequest:
+      type: object
+      required:
+        - entityType
+        - entityId
+      properties:
+        entityType:
+          type: string
+          example: knowpost
+        entityId:
+          type: string
+          example: "{{postId}}"
+
+    LikeActionResponse:
+      type: object
+      required:
+        - changed
+        - liked
+      properties:
+        changed:
+          type: boolean
+          description: 本次操作是否真的改变了状态。
+        liked:
+          type: boolean
+          description: 操作后是否已点赞。
+
+    FavActionResponse:
+      type: object
+      required:
+        - changed
+        - faved
+      properties:
+        changed:
+          type: boolean
+          description: 本次操作是否真的改变了状态。
+        faved:
+          type: boolean
+          description: 操作后是否已收藏。
+
+    CountsResponse:
+      type: object
+      properties:
+        entityType:
+          type: string
+        entityId:
+          type: string
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          example:
+            like: 12
+            fav: 3
+
+    RelationStatusResponse:
+      type: object
+      properties:
+        following:
+          type: boolean
+          description: 当前用户是否关注了目标用户。
+        followedBy:
+          type: boolean
+          description: 目标用户是否关注了当前用户。
+        mutual:
+          type: boolean
+          description: 是否互相关注。
+
+    UserCounterResponse:
+      type: object
+      properties:
+        followings:
+          type: integer
+          format: int64
+        followers:
+          type: integer
+          format: int64
+        posts:
+          type: integer
+          format: int64
+        likedPosts:
+          type: integer
+          format: int64
+        favedPosts:
+          type: integer
+          format: int64

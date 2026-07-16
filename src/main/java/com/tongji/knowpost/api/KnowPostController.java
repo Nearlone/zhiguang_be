@@ -3,6 +3,7 @@ package com.tongji.knowpost.api;
 import com.tongji.auth.token.JwtService;
 import com.tongji.knowpost.api.dto.KnowPostContentConfirmRequest;
 import com.tongji.knowpost.api.dto.KnowPostDraftCreateResponse;
+import com.tongji.knowpost.api.dto.KnowPostPublishResponse;
 import com.tongji.knowpost.api.dto.KnowPostPatchRequest;
 import com.tongji.knowpost.api.dto.KnowPostTopPatchRequest;
 import com.tongji.knowpost.api.dto.KnowPostVisibilityPatchRequest;
@@ -66,11 +67,10 @@ public class KnowPostController {
      * 发布帖子（状态置为 published）。
      */
     @PostMapping("/{id}/publish")
-    public ResponseEntity<Void> publish(@PathVariable("id") long id,
-                                        @AuthenticationPrincipal Jwt jwt) {
+    public KnowPostPublishResponse publish(@PathVariable("id") long id,
+                                           @AuthenticationPrincipal Jwt jwt) {
         long userId = jwtService.extractUserId(jwt);
-        service.publish(userId, id);
-        return ResponseEntity.noContent().build();
+        return service.publish(userId, id);
     }
 
     /**

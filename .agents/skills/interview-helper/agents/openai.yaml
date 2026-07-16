@@ -1,0 +1,7 @@
+interface:
+  display_name: "Interview Helper"
+  short_description: "知光项目 AI 应用工程师与 Java 后端面试助手"
+  default_prompt: "Use $interview-helper to prepare AI application and Java backend interview answers for the ZhiGuang project."
+
+policy:
+  allow_implicit_invocation: true
