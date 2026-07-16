@@ -24,7 +24,8 @@ class RagQueryServiceTest {
         indexService = new RecordingRagIndexService();
         // chatClient 故意传 null：若空召回分支仍调用模型，测试会立刻失败。
         ragQueryService = new RagQueryService(
-                vectorStoreReturning(List.of()), null, indexService, new RagPromptBuilder(), new RagTokenTracker());
+                vectorStoreReturning(List.of()), null, indexService, new RagPromptBuilder(), new RagTokenTracker(),
+                new RagCitationMapper());
     }
 
     @Test
@@ -58,7 +59,7 @@ class RagQueryServiceTest {
                 "postId", "123", "chunkId", "123#2", "position", 2, "title", "RAG工程化"));
         RagQueryService service = new RagQueryService(
                 vectorStoreReturning(List.of(foreignPost, currentPost)), null, null,
-                new RagPromptBuilder(), new RagTokenTracker());
+                new RagPromptBuilder(), new RagTokenTracker(), new RagCitationMapper());
 
         List<RagContext> contexts = service.searchContexts("123", "问题", 5);
 

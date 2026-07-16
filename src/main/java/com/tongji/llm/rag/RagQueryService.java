@@ -42,6 +42,8 @@ public class RagQueryService {
     private final RagPromptBuilder promptBuilder;
     // Token 跟踪器：调用前只做估算，调用后优先记录服务商返回的准确 usage
     private final RagTokenTracker tokenTracker;
+    // 引用映射器：把模型使用的短别名安全地转换成前端原有的完整 chunkId
+    private final RagCitationMapper citationMapper;
 
     /**
      * 使用 WebFlux 返回回答内容的流。
@@ -93,8 +95,9 @@ public class RagQueryService {
         }
 
         // Prompt 组装独立封装，查询服务只负责串联“检索 -> 构造 Prompt -> 流式生成”。
+        List<RagPromptSource> promptSources = RagPromptSource.fromContexts(contexts);
         String system = promptBuilder.buildSystemPrompt();
-        String user = promptBuilder.buildUserPrompt(normalizedQuestion, contexts);
+        String user = promptBuilder.buildUserPrompt(normalizedQuestion, promptSources);
         int estimatedPromptTokens = tokenTracker.estimatePromptTokens(system, user);
         QueryLogContext logContext = new QueryLogContext(
                 requestId, postId, normalizedTopK, fetchK, chunkIds, indexMs, retrievalMs,
@@ -111,7 +114,7 @@ public class RagQueryService {
             AtomicReference<String> finishReason = new AtomicReference<>("unknown");
             StringBuilder generatedText = new StringBuilder();
 
-            return chatClient
+            Flux<String> modelDeltas = chatClient
                     .prompt()
                     .system(system)
                     .user(user)
@@ -130,13 +133,18 @@ public class RagQueryService {
                             // usage 可能位于不含文本的最后一个流式响应中，因此只跳过输出，不跳过 metadata 处理。
                             return;
                         }
+                        sink.next(delta);
+                    });
+
+            // 模型只生成 [S1] 等短别名；后端在 SSE 流中映射为真实 chunkId，并过滤未知来源。
+            return citationMapper.mapToChunkIds(modelDeltas, promptSources, requestId, postId)
+                    .doOnNext(delta -> {
                         generatedText.append(delta);
                         if (firstTokenSeen.compareAndSet(false, true)) {
                             long ttftMs = elapsedMillis(queryStartedNanos);
                             firstTokenMs.set(ttftMs);
                             log.info("RAG first token requestId={} postId={} firstTokenMs={}", requestId, postId, ttftMs);
                         }
-                        sink.next(delta);
                     })
                     .doOnComplete(() -> {
                         if (terminalLogged.compareAndSet(false, true)) {
