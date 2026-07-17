@@ -7,6 +7,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +63,63 @@ class RagIndexServiceTest {
         assertThat(recordingStore.deletedIds).containsExactlyElementsOf(
                 documents.stream().map(Document::getId).toList());
         assertThat(indexed).isZero();
+    }
+
+    @Test
+    void decodesMarkdownBytesAsUtf8AndRemovesBom() {
+        byte[] markdown = ("\uFEFF# 缓存穿透\n参数校验与空值缓存")
+                .getBytes(StandardCharsets.UTF_8);
+
+        assertThat(RagIndexService.decodeUtf8Content(markdown))
+                .isEqualTo("# 缓存穿透\n参数校验与空值缓存");
+        assertThat(RagIndexService.decodeUtf8Content(new byte[0])).isNull();
+    }
+
+    @Test
+    void rebuildsMetadataWithoutCurrentIndexVersion() {
+        assertThat(RagIndexService.hasCurrentIndexVersion(Map.of())).isFalse();
+        assertThat(RagIndexService.hasCurrentIndexVersion(Map.of("ragIndexVersion", "1"))).isFalse();
+        assertThat(RagIndexService.hasCurrentIndexVersion(Map.of(
+                "ragIndexVersion", RagIndexService.RAG_INDEX_VERSION))).isTrue();
+    }
+
+    @Test
+    void carriesParentHeadingsIntoChildSectionsAndSkipsHeadingOnlyChunks() {
+        String markdown = """
+                # 缓存专题
+
+                ## 缓存穿透
+                ### 空值缓存
+                空值 TTL 要短。
+
+                ### 布隆过滤器
+                说不存在，一定不存在。
+                """;
+
+        List<String> chunks = RagIndexService.chunkMarkdown(markdown);
+
+        assertThat(chunks).hasSize(2);
+        assertThat(chunks.get(0))
+                .contains("# 缓存专题", "## 缓存穿透", "### 空值缓存", "空值 TTL 要短");
+        assertThat(chunks.get(1))
+                .contains("# 缓存专题", "## 缓存穿透", "### 布隆过滤器", "说不存在，一定不存在");
+        assertThat(chunks).noneMatch(chunk -> chunk.strip().equals("## 缓存穿透"));
+    }
+
+    @Test
+    void doesNotTreatHashesInsideCodeFenceAsMarkdownHeadings() {
+        String markdown = """
+                # 示例
+                ```text
+                # 这是代码内容
+                ```
+                代码块之后的说明。
+                """;
+
+        List<String> chunks = RagIndexService.chunkMarkdown(markdown);
+
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.getFirst()).contains("# 示例", "# 这是代码内容", "代码块之后的说明");
     }
 
     private static List<Document> documents(int count) {

@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 /**
@@ -34,6 +35,8 @@ public class RagIndexService {
     static final int EMBEDDING_BATCH_SIZE = 10;
     // 控制单篇知文的向量数量，避免异常大正文带来过高的调用成本和索引膨胀。
     static final int MAX_CHUNKS_PER_POST = 100;
+    // 索引格式升级时递增版本，使正文指纹未变化的旧向量也能自动重建。
+    static final String RAG_INDEX_VERSION = "3";
     // 向量库封装（Elasticsearch VectorStore），负责写入/检索向量
     private final VectorStore vectorStore;
     // 数据访问：根据 postId 查询知文详情（含 contentUrl、指纹等）
@@ -161,6 +164,7 @@ public class RagIndexService {
             meta.put("contentSha256", currentSha);
             meta.put("contentUrl", row.getContentUrl());
             meta.put("title", row.getTitle());
+            meta.put("ragIndexVersion", RAG_INDEX_VERSION);
             // 使用稳定的 chunkId 作为 ES 文档 ID，重建时可覆盖同位置切片，也便于失败后精确清理。
             docs.add(new Document(cid, chunks.get(i), meta));
         }
@@ -230,8 +234,30 @@ public class RagIndexService {
             }
         }
 
+        if (!refreshIndex(postId)) {
+            cleanupFailedWrite(postId, docs);
+            return 0;
+        }
+
         log.info("RAG index completed: postId={}, chunks={}, batches={}", postId, totalChunks, totalBatches);
         return totalChunks;
+    }
+
+    /**
+     * 写入成功后主动刷新索引，保证同一个问答请求紧接着检索时能看到新向量。
+     * refresh 只发生在低频的文章重建链路，不增加每次查询的 ES 开销。
+     */
+    private boolean refreshIndex(long postId) {
+        if (es == null || esProps == null || !StringUtils.hasText(esProps.getIndex())) {
+            return true;
+        }
+        try {
+            es.indices().refresh(r -> r.index(esProps.getIndex()));
+            return true;
+        } catch (Exception e) {
+            log.warn("Refresh RAG index failed for post {}: {}", postId, e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -264,6 +290,7 @@ public class RagIndexService {
     /**
      * 指纹判断是否需要重建：
      * - 以 postId 查询任意一条已索引文档的 metadata
+     * - 先校验索引格式版本，旧版本必须重建，不能只依赖未变化的正文指纹
      * - 优先比较 SHA256，其次比较 ETag；一致则视为无需重建
      */
     private boolean isUpToDate(long postId, String currentSha, String currentEtag) {
@@ -285,6 +312,10 @@ public class RagIndexService {
             if (source == null) return false;
             Object metaObj = source.get("metadata");
             if (!(metaObj instanceof Map<?, ?> meta)) return false;
+            if (!hasCurrentIndexVersion(meta)) {
+                log.info("Post {} uses an outdated RAG index version, rebuild required", postId);
+                return false;
+            }
             String indexedSha = asString(meta.get("contentSha256"));
             String indexedEtag = asString(meta.get("contentEtag"));
             if (StringUtils.hasText(currentSha) && StringUtils.hasText(indexedSha)) {
@@ -323,36 +354,106 @@ public class RagIndexService {
         return o == null ? null : String.valueOf(o);
     }
 
+    static boolean hasCurrentIndexVersion(Map<?, ?> metadata) {
+        return metadata != null
+                && RAG_INDEX_VERSION.equals(asString(metadata.get("ragIndexVersion")));
+    }
+
     /**
      * 拉取正文内容（Markdown 文本）。
      */
     private String fetchContent(String url) {
         try {
-            return http.getForObject(url, String.class);
+            // OSS 的 text/markdown 响应可能不带 charset；直接转 String 会被按 ISO-8859-1 解码并污染向量。
+            byte[] bytes = http.getForObject(url, byte[].class);
+            return decodeUtf8Content(bytes);
         } catch (Exception e) {
             log.error("Fetch content failed: {}", e.getMessage());
             return null;
         }
     }
 
-    /**
-     * 按 Markdown 标题切段，再交由固定长度切片策略处理。
-     */
-    private List<String> chunkMarkdown(String text) {
-        List<String> paras = new ArrayList<>();
-        String[] lines = text.split("\r?\n");
-        StringBuilder buf = new StringBuilder();
-        for (String line : lines) {
-            boolean isHeader = line.startsWith("#");
-            if (isHeader && !buf.isEmpty()) { // 遇到新的标题，收束上一段
-                paras.add(buf.toString());
-                buf.setLength(0);
-            }
-            buf.append(line).append('\n');
+    static String decodeUtf8Content(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
         }
-        if (!buf.isEmpty()) paras.add(buf.toString());
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        // 部分 Markdown 文件带 UTF-8 BOM，去除后可避免首个标题识别失败。
+        return text.startsWith("\uFEFF") ? text.substring(1) : text;
+    }
 
-        return getChunks(paras);
+    /**
+     * 按 Markdown 标题层级切段：
+     * - 子节继承父标题，让“缓存穿透 -> 空值缓存”这类语义同时进入 Embedding；
+     * - 跳过只有标题没有正文的空片段，避免它们挤占 topK；
+     * - 代码块中的 # 不是标题，不能误切正文。
+     */
+    static List<String> chunkMarkdown(String text) {
+        if (!StringUtils.hasText(text)) {
+            return List.of();
+        }
+
+        List<String> sections = new ArrayList<>();
+        String[] headings = new String[6];
+        StringBuilder body = new StringBuilder();
+        boolean inCodeFence = false;
+        String fenceMarker = null;
+
+        for (String line : text.split("\r?\n")) {
+            String stripped = line.stripLeading();
+            String currentFence = fenceMarker(stripped);
+            int headingLevel = inCodeFence ? 0 : markdownHeadingLevel(line);
+
+            if (headingLevel > 0) {
+                appendSection(sections, headings, body);
+                headings[headingLevel - 1] = line.trim();
+                Arrays.fill(headings, headingLevel, headings.length, null);
+                continue;
+            }
+
+            body.append(line).append('\n');
+            if (currentFence != null) {
+                if (!inCodeFence) {
+                    inCodeFence = true;
+                    fenceMarker = currentFence;
+                } else if (currentFence.equals(fenceMarker)) {
+                    inCodeFence = false;
+                    fenceMarker = null;
+                }
+            }
+        }
+        appendSection(sections, headings, body);
+        return getChunks(sections);
+    }
+
+    private static void appendSection(List<String> sections, String[] headings, StringBuilder body) {
+        if (!StringUtils.hasText(body)) {
+            body.setLength(0);
+            return;
+        }
+        StringBuilder section = new StringBuilder();
+        for (String heading : headings) {
+            if (heading != null) {
+                section.append(heading).append('\n');
+            }
+        }
+        section.append('\n').append(body);
+        sections.add(section.toString());
+        body.setLength(0);
+    }
+
+    private static int markdownHeadingLevel(String line) {
+        int level = 0;
+        while (level < line.length() && level < 6 && line.charAt(level) == '#') {
+            level++;
+        }
+        return level > 0 && level < line.length() && Character.isWhitespace(line.charAt(level)) ? level : 0;
+    }
+
+    private static String fenceMarker(String strippedLine) {
+        if (strippedLine.startsWith("```")) return "```";
+        if (strippedLine.startsWith("~~~")) return "~~~";
+        return null;
     }
 
     /**

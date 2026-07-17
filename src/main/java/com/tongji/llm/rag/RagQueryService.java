@@ -9,12 +9,19 @@ import org.springframework.ai.deepseek.DeepSeekChatOptions;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.Filter;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -31,6 +38,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public class RagQueryService {
     private static final Logger log = LoggerFactory.getLogger(RagQueryService.class);
     private static final String CHAT_MODEL = "deepseek-chat";
+    // RRF 只使用两路结果的相对排名；常用平滑常数 60 可避免第一名获得过大的单路优势。
+    private static final int RRF_RANK_CONSTANT = 60;
 
     // 向量检索接口（Elasticsearch 向量库封装）
     private final VectorStore vectorStore;
@@ -44,6 +53,10 @@ public class RagQueryService {
     private final RagTokenTracker tokenTracker;
     // 引用映射器：把模型使用的短别名安全地转换成前端原有的完整 chunkId
     private final RagCitationMapper citationMapper;
+    // BM25 补充召回：优先找回问题中的术语、参数名和并列项，失败时降级为纯向量检索。
+    private final RagKeywordSearchService keywordSearchService;
+    // 可评测校准的相关性阈值，避免无关问题携带整篇文章上下文进入模型。
+    private final RagProperties ragProperties;
 
     /**
      * 使用 WebFlux 返回回答内容的流。
@@ -63,7 +76,8 @@ public class RagQueryService {
             indexResult = indexService.ensureIndexed(postId);
         } catch (RuntimeException e) {
             logSynchronousFailure(requestId, postId, "index", queryStartedNanos, e);
-            throw e;
+            // 同步异常发生在 Flux 建立前；转换为固定 SSE 文案，前端不会只看到断开的空响应。
+            return Flux.just(RagMessages.SERVICE_UNAVAILABLE_ANSWER);
         }
         long indexMs = elapsedMillis(indexStartedNanos);
         if (indexResult.status() != RagIndexStatus.READY) {
@@ -73,19 +87,21 @@ public class RagQueryService {
             return Flux.just(indexResult.message());
         }
 
-        // 检索上下文：先宽召回，再按 postId 做服务端过滤
+        // 检索上下文：先在向量库中限定当前知文，再从该知文内部进行宽召回。
         long retrievalStartedNanos = System.nanoTime();
         List<RagContext> contexts;
         try {
             contexts = searchContexts(String.valueOf(postId), normalizedQuestion, normalizedTopK);
         } catch (RuntimeException e) {
             logSynchronousFailure(requestId, postId, "retrieval", queryStartedNanos, e);
-            throw e;
+            return Flux.just(RagMessages.SERVICE_UNAVAILABLE_ANSWER);
         }
         long retrievalMs = elapsedMillis(retrievalStartedNanos);
         List<String> chunkIds = contexts.stream().map(RagContext::chunkId).toList();
-        log.info("RAG retrieval completed requestId={} postId={} topK={} fetchK={} hitCount={} chunkIds={} indexMs={} retrievalMs={}",
-                requestId, postId, normalizedTopK, fetchK, contexts.size(), chunkIds, indexMs, retrievalMs);
+        log.info("RAG retrieval completed requestId={} postId={} retrievalMode=hybrid_current_post topK={} fetchK={} "
+                        + "similarityThreshold={} hitCount={} chunkIds={} indexMs={} retrievalMs={}",
+                requestId, postId, normalizedTopK, fetchK,
+                ragProperties.getRetrieval().getSimilarityThreshold(), contexts.size(), chunkIds, indexMs, retrievalMs);
 
         if (contexts.isEmpty()) {
             // 没有事实依据时不调用 DeepSeek，既降低幻觉，也节省一次模型生成成本。
@@ -167,32 +183,108 @@ public class RagQueryService {
     }
 
     /**
-     * 语义检索上下文：
-     * - 先进行宽召回（fetchK ≥ 3×topK，至少 20）提高召回率
-     * - 再按 metadata.postId 做服务端过滤，避免跨帖子污染
+     * 混合检索上下文：
+     * - 先用 metadata.postId 将 KNN 检索范围限定为当前知文，避免其他知文挤占候选名额
+     * - 在当前知文内宽召回（fetchK ≥ 3×topK，至少 20），为后续重排预留候选
+     * - 使用 BM25 补充精确术语和并列项，通过 RRF 融合两路排名后限制上下文数量
+     * - Java 层继续校验 postId，防御历史脏数据或向量库过滤异常
      * - 保留 chunkId、position 和 title，为回答引用提供可追溯来源
      */
     List<RagContext> searchContexts(String postId, String query, int topK) {
-        int fetchK = fetchKFor(topK); // 宽召回：扩大初始检索集合
+        int fetchK = fetchKFor(topK);
+        double similarityThreshold = ragProperties.getRetrieval().getSimilarityThreshold();
+        // 使用结构化表达式而不是拼接查询字符串，避免特殊字符破坏 ES 查询语法。
+        Filter.Expression currentPostFilter = new FilterExpressionBuilder()
+                .eq("postId", postId)
+                .build();
         List<Document> docs = vectorStore.similaritySearch(
-                SearchRequest.builder().query(query).topK(fetchK).build() // 语义相似检索
+                SearchRequest.builder()
+                        .query(query)
+                        .topK(fetchK)
+                        .similarityThreshold(similarityThreshold)
+                        .filterExpression(currentPostFilter)
+                        .build()
         );
-        List<RagContext> out = new ArrayList<>(topK);
+        List<RagContext> vectorContexts = new ArrayList<>(fetchK);
         for (Document d : docs) {
+            if (d.getScore() != null && d.getScore() < similarityThreshold) {
+                // 二次防线：即使替换 VectorStore 实现后忽略了 SearchRequest 阈值，也不放行低相关切片。
+                continue;
+            }
             Object pid = d.getMetadata().get("postId");
             if (pid != null && postId.equals(String.valueOf(pid))) { // 仅保留当前帖子对应的切片
                 String txt = d.getText();
                 if (StringUtils.hasText(txt)) {
                     // metadata 来自历史索引，字段可能缺失或类型变化，因此解析时提供稳定兜底值。
-                    int position = asInt(d.getMetadata().get("position"), out.size());
+                    int position = asInt(d.getMetadata().get("position"), vectorContexts.size());
                     String chunkId = asText(d.getMetadata().get("chunkId"), postId + "#" + position);
                     String title = asText(d.getMetadata().get("title"), "当前知文");
-                    out.add(new RagContext(chunkId, position, title, txt.trim()));
-                    if (out.size() >= topK) break; // 只取前 topK 个上下文
+                    vectorContexts.add(new RagContext(chunkId, position, title, txt.trim()));
+                    if (vectorContexts.size() >= fetchK) break;
                 }
             }
         }
-        return out;
+        if (vectorContexts.isEmpty()) {
+            // BM25 可补充术语排序，但不能单独证明语义相关；无向量证据时直接拒答并节省生成 Token。
+            return List.of();
+        }
+        if (keywordSearchService == null) {
+            return vectorContexts.stream().limit(topK).toList();
+        }
+        List<RagContext> keywordContexts = keywordSearchService.search(postId, query, Math.min(fetchKFor(topK), 10));
+        // topK 的接口语义是最终进入 Prompt 的上下文数量，而不是单路召回数量。
+        return mergeContexts(keywordContexts, vectorContexts, topK);
+    }
+
+    /**
+     * 使用倒数排名融合（RRF）合并 BM25 与向量召回：
+     * - 不直接比较 BM25 分数和向量相似度，因为两者量纲不同；
+     * - 同一切片被两路命中时累计排名分数，使共同认可的证据优先；
+     * - 单路高排名切片仍可进入结果，避免某一路先填满 limit 后挤掉另一条检索通道；
+     * - 以 chunkId 去重，限制最终上下文数量，控制 Prompt Token 开销。
+     */
+    static List<RagContext> mergeContexts(List<RagContext> keywordContexts,
+                                          List<RagContext> vectorContexts,
+                                          int limit) {
+        if (limit <= 0) {
+            return List.of();
+        }
+        Map<String, FusionCandidate> candidates = new LinkedHashMap<>();
+        addRrfScores(candidates, keywordContexts);
+        addRrfScores(candidates, vectorContexts);
+        return candidates.values().stream()
+                .sorted(Comparator.comparingDouble(FusionCandidate::score).reversed()
+                        .thenComparingInt(FusionCandidate::bestRank)
+                        .thenComparingInt(FusionCandidate::firstSeenOrder))
+                .limit(limit)
+                .map(FusionCandidate::context)
+                .toList();
+    }
+
+    private static void addRrfScores(Map<String, FusionCandidate> candidates, List<RagContext> rankedContexts) {
+        if (rankedContexts == null || rankedContexts.isEmpty()) {
+            return;
+        }
+        Set<String> seenInCurrentRetriever = new HashSet<>();
+        for (int index = 0; index < rankedContexts.size(); index++) {
+            RagContext context = rankedContexts.get(index);
+            if (context == null || !StringUtils.hasText(context.chunkId())
+                    || !seenInCurrentRetriever.add(context.chunkId())) {
+                // 同一路中的脏重复数据不能重复投票，否则会人为放大该切片的融合分数。
+                continue;
+            }
+            int rank = index + 1;
+            double scoreContribution = 1.0 / (RRF_RANK_CONSTANT + rank);
+            FusionCandidate existing = candidates.get(context.chunkId());
+            if (existing == null) {
+                candidates.put(context.chunkId(), new FusionCandidate(
+                        context, scoreContribution, rank, candidates.size()));
+            } else {
+                candidates.put(context.chunkId(), new FusionCandidate(
+                        existing.context(), existing.score() + scoreContribution,
+                        Math.min(existing.bestRank(), rank), existing.firstSeenOrder()));
+            }
+        }
     }
 
     private void captureResponseMetadata(ChatResponse response,
@@ -282,6 +374,15 @@ public class RagQueryService {
             int maxTokens,
             int estimatedPromptTokens,
             long queryStartedNanos
+    ) {
+    }
+
+    /** RRF 排序的内部候选，不暴露检索分数，避免改变 RagContext 与 Prompt 的既有契约。 */
+    private record FusionCandidate(
+            RagContext context,
+            double score,
+            int bestRank,
+            int firstSeenOrder
     ) {
     }
 
