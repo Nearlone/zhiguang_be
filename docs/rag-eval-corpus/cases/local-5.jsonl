@@ -1,0 +1,30 @@
+{"qid":"P1-Q1","corpus":"本地5篇","postId":"335984259514896384","type":"总结","question":"RAG 主要解决大模型的哪些问题，它又不能保证什么？","expected":"补充私有和动态知识、减少幻觉、提供来源；检索、切片、排序和 Prompt 质量仍会影响结果，RAG 不能天然保证正确"}
+{"qid":"P1-Q2","corpus":"本地5篇","postId":"335984259514896384","type":"步骤","question":"文档描述的生产级 RAG 在线查询链路依次包含哪些步骤？","expected":"参数校验、权限校验、向量检索、过滤和重排、构造 Prompt、调用 LLM、SSE 返回、记录日志与指标"}
+{"qid":"P1-Q3","corpus":"本地5篇","postId":"335984259514896384","type":"机制","question":"知光为什么使用 contentSha256 和 contentEtag，它如何避免重复索引？","expected":"两者作为内容指纹；一致时跳过重建，不一致时删除旧 chunk 并重新切片、向量化和写入"}
+{"qid":"P1-Q4","corpus":"本地5篇","postId":"335984259514896384","type":"对比","question":"topK 太小和太大分别有什么问题，文档对单篇长知文有什么建议？","expected":"太小会漏召回、上下文不足；太大会引入噪声、增加 Token 成本并干扰模型；单篇长知文建议 topK=5"}
+{"qid":"P1-Q5","corpus":"本地5篇","postId":"335984259514896384","type":"事实","question":"回答中携带来源编号能支持哪些工程能力？","expected":"用户信任、前端高亮、离线评测引用准确率、排查错误引用和面试讲解"}
+{"qid":"P1-Q6","corpus":"本地5篇","postId":"335984259514896384","type":"拒答","question":"这套 RAG 系统在线上实测的 P95 延迟和每天平均费用分别是多少？","expected":"当前知文没有真实线上测量值，应拒答"}
+{"qid":"P2-Q1","corpus":"本地5篇","postId":"335984638235381760","type":"对比","question":"Embedding 模型和 Chat 模型的输入输出及用途有什么区别？","expected":"Embedding 将文本转换为向量，用于检索、聚类和相似度；Chat 模型接收文本或消息并生成文本，用于对话、生成和推理"}
+{"qid":"P2-Q2","corpus":"本地5篇","postId":"335984638235381760","type":"步骤","question":"向量检索的索引阶段和查询阶段分别经过哪些步骤？","expected":"索引阶段为 chunk、Embedding、向量、向量库；查询阶段为问题、Embedding、查询向量、相似度检索、topK chunks"}
+{"qid":"P2-Q3","corpus":"本地5篇","postId":"335984638235381760","type":"事实","question":"文档列举了哪些常见向量相似度算法，余弦相似度关注什么？","expected":"余弦相似度、点积、欧氏距离；余弦相似度关注向量方向或夹角是否接近"}
+{"qid":"P2-Q4","corpus":"本地5篇","postId":"335984638235381760","type":"机制","question":"为什么向量检索除了 topK 以外还需要 similarity threshold？","expected":"没有阈值时，无关问题也会返回相对最相似的结果；阈值用于过滤低相关切片并避免模型强答"}
+{"qid":"P2-Q5","corpus":"本地5篇","postId":"335984638235381760","type":"事实","question":"向量库中的 metadata 可以承担哪些业务作用？","expected":"业务过滤、权限控制、版本管理和引用展示；项目保存 postId、chunkId、position、contentSha256、title 等信息"}
+{"qid":"P2-Q6","corpus":"本地5篇","postId":"335984638235381760","type":"拒答","question":"当前项目使用的 Embedding 模型具体输出多少维向量？","expected":"当前知文没有给出模型名称对应的准确向量维度，应拒答"}
+{"qid":"P3-Q1","corpus":"本地5篇","postId":"335984851201167360","type":"对比","question":"缓存穿透、缓存击穿和缓存雪崩的核心原因分别是什么？","expected":"穿透是反复查询不存在的数据；击穿是单个热点 key 失效；雪崩是大量 key 同时失效或 Redis 故障"}
+{"qid":"P3-Q2","corpus":"本地5篇","postId":"335984851201167360","type":"总结","question":"文档给出了哪些解决缓存穿透的方法，各自有什么注意点？","expected":"参数校验、短 TTL 空值缓存、布隆过滤器；空值防止占用过多内存，布隆过滤器存在误判但判断不存在时一定不存在"}
+{"qid":"P3-Q3","corpus":"本地5篇","postId":"335984851201167360","type":"机制","question":"项目中的 single flight 如何缓解缓存击穿，它在多实例部署时有什么限制？","expected":"同一 JVM 内同一个 key 只允许一个线程回源；其他线程等待并重查缓存；多实例时应升级为 Redis 分布式锁等跨实例协调方式"}
+{"qid":"P3-Q4","corpus":"本地5篇","postId":"335984851201167360","type":"机制","question":"为什么缓存一致性通常采用“先更新数据库，再删除缓存”，而不是先删除缓存？","expected":"先删缓存可能让并发读回源旧数据库值并重新写入缓存，随后数据库更新，造成旧值长期残留"}
+{"qid":"P3-Q5","corpus":"本地5篇","postId":"335984851201167360","type":"步骤","question":"数据库更新成功但缓存删除失败时，可以采取哪些补偿措施？","expected":"日志告警、消息重试、Outbox 保证事件可靠、较短 TTL 兜底，也可通过 Canal 或 binlog 异步同步"}
+{"qid":"P3-Q6","corpus":"本地5篇","postId":"335984851201167360","type":"拒答","question":"Redis 7 默认的 hz 配置值是多少，知光线上是否修改过这个值？","expected":"当前知文没有 Redis hz 参数和线上配置数据，应拒答"}
+{"qid":"P4-Q1","corpus":"本地5篇","postId":"335984979240685568","type":"事实","question":"ThreadPoolExecutor 的七个核心构造参数分别有什么含义？","expected":"corePoolSize、maximumPoolSize、keepAliveTime、unit、workQueue、threadFactory、handler 及其对应作用"}
+{"qid":"P4-Q2","corpus":"本地5篇","postId":"335984979240685568","type":"步骤","question":"调用 execute 提交任务后，线程池按照什么顺序决定创建线程、进入队列或拒绝任务？","expected":"先检查核心线程数，再尝试入队；队列满且未到最大线程数时创建非核心线程；达到最大线程数后执行拒绝策略"}
+{"qid":"P4-Q3","corpus":"本地5篇","postId":"335984979240685568","type":"对比","question":"ArrayBlockingQueue、LinkedBlockingQueue 和 SynchronousQueue 的主要区别及风险是什么？","expected":"ArrayBlockingQueue 有界且内存可控；LinkedBlockingQueue 可近似无界，可能积压导致 OOM；SynchronousQueue 不存任务，缺少空闲线程时可能继续创建线程"}
+{"qid":"P4-Q4","corpus":"本地5篇","postId":"335984979240685568","type":"事实","question":"线程池四种内置拒绝策略分别如何处理无法接收的任务？","expected":"Abort 抛异常、CallerRuns 由调用线程执行、Discard 静默丢弃、DiscardOldest 丢弃最老任务后重试"}
+{"qid":"P4-Q5","corpus":"本地5篇","postId":"335984979240685568","type":"对比","question":"execute 和 submit 在返回值与异常处理方面有什么区别？","expected":"execute 无返回值，异常交给 UncaughtExceptionHandler；submit 返回 Future，异常封装在 Future 中，调用 get 时抛出"}
+{"qid":"P4-Q6","corpus":"本地5篇","postId":"335984979240685568","type":"拒答","question":"知光生产环境线程池的 corePoolSize、maximumPoolSize 和队列容量分别配置为多少？","expected":"当前知文没有线上具体配置，应拒答"}
+{"qid":"P5-Q1","corpus":"本地5篇","postId":"335705124099985408","type":"事实","question":"事务的 ACID 分别表示什么，原子性和持久性主要依赖哪些日志？","expected":"原子性、一致性、隔离性、持久性；原子性依赖 undo log，持久性依赖 redo log"}
+{"qid":"P5-Q2","corpus":"本地5篇","postId":"335705124099985408","type":"对比","question":"脏读、不可重复读和幻读分别描述什么现象？","expected":"读取未提交数据、同一行两次读取结果不同、范围查询前后行数因新增或删除而变化"}
+{"qid":"P5-Q3","corpus":"本地5篇","postId":"335705124099985408","type":"机制","question":"InnoDB 的 MVCC 主要依赖哪些组件，它如何找到对当前事务可见的数据版本？","expected":"隐藏字段、undo log 版本链、Read View；沿版本链查找，并根据 Read View 判断版本可见性"}
+{"qid":"P5-Q4","corpus":"本地5篇","postId":"335705124099985408","type":"对比","question":"Read Committed 和 Repeatable Read 在创建 Read View 的时机上有什么区别？","expected":"RC 每次 SELECT 创建新的 Read View；RR 第一次快照读创建后，在事务内后续快照读复用"}
+{"qid":"P5-Q5","corpus":"本地5篇","postId":"335705124099985408","type":"机制","question":"InnoDB 的 Repeatable Read 如何分别处理快照读和当前读场景下的幻读？","expected":"快照读通过复用 Read View；当前读通过记录锁、间隙锁和 next-key lock 阻止范围内插入"}
+{"qid":"P5-Q6","corpus":"本地5篇","postId":"335705124099985408","type":"拒答","question":"InnoDB 源码中负责清理 undo log 历史版本的具体类名和函数名是什么？","expected":"当前知文没有源码实现细节，应拒答"}

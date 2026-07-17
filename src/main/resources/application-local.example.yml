@@ -43,4 +43,5 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # metrics 端点需要鉴权，只用于本地排查和监控采集。
+        include: health,info,metrics

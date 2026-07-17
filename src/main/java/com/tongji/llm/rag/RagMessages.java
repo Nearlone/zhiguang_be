@@ -8,6 +8,7 @@ package com.tongji.llm.rag;
 final class RagMessages {
 
     static final String NO_CONTEXT_ANSWER = "当前知文中没有足够信息回答这个问题。";
+    static final String SERVICE_UNAVAILABLE_ANSWER = "AI问答服务暂时不可用，请稍后重试。";
 
     private RagMessages() {
     }
