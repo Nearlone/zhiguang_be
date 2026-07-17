@@ -1,7 +1,7 @@
 # 知光 RAG 扩展评测语料
 
-本目录保存 15 篇面向单篇知文问答的原创整理稿。内容依据官方文档重新组织，保留来源链接，
-用于验证 Markdown 分块、BM25 精确召回、向量语义召回、RRF 融合、来源引用和空召回拒答。
+本目录保存 15 篇面向单篇知文问答的原创整理稿，并将此前人工上传的 5 篇本地学习笔记纳入统一评测。
+20 篇知文用于验证 Markdown 分块、BM25 精确召回、向量语义召回、RRF 融合、来源引用和空召回拒答。
 
 ## 使用约定
 
@@ -13,6 +13,35 @@
 - 实际上传和向量核验结果见 [`UPLOAD_RESULT.md`](./UPLOAD_RESULT.md)。
 - 第一轮 45 道基线题及评分规则见 [`EVALUATION_QUESTIONS.md`](./EVALUATION_QUESTIONS.md)。
 - 2026-07-16 首轮实测结果见 [`BASELINE_REPORT_2026-07-16.md`](./BASELINE_REPORT_2026-07-16.md)。
+- 结构化题库位于 [`cases`](./cases) 目录，共 75 题：扩展 15 篇 45 题，本地 5 篇 30 题。
+- 阈值校准先执行 [`THRESHOLD_PILOT_CASES.txt`](./THRESHOLD_PILOT_CASES.txt) 中的 16 道代表题。
+- P0 最终结论见 [`P0_CLOSURE_REPORT_2026-07-17.md`](./P0_CLOSURE_REPORT_2026-07-17.md)。
+
+## 自动化执行
+
+评测脚本只调用当前运行中的后端并记录结果，不会自动修改配置或业务代码。切换阈值后应重启后端，
+再用相同参数执行下一轮，避免多个变量同时变化。
+
+```bash
+# 先校验 20 篇、75 题是否能被完整读取
+scripts/rag-eval.sh --dry-run --threshold 0.50
+
+# 执行 16 道阈值校准题
+scripts/rag-eval.sh \
+  --case-ids docs/rag-eval-corpus/THRESHOLD_PILOT_CASES.txt \
+  --threshold 0.50
+
+# 执行 75 道完整回归
+scripts/rag-eval.sh --threshold 0.50
+```
+
+最终完整评测应单独启动关闭用户限流的本地实例；正常前端使用时保持限流开启：
+
+```bash
+RAG_SIMILARITY_THRESHOLD=0.5 \
+RAG_RATE_LIMIT_ENABLED=false \
+mvn spring-boot:run -Dspring-boot.run.profiles=local
+```
 
 ## 文档清单
 

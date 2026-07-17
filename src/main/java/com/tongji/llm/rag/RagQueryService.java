@@ -1,6 +1,7 @@
 package com.tongji.llm.rag;
 
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -11,12 +12,14 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.DoubleSummaryStatistics;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -57,12 +60,67 @@ public class RagQueryService {
     private final RagKeywordSearchService keywordSearchService;
     // 可评测校准的相关性阈值，避免无关问题携带整篇文章上下文进入模型。
     private final RagProperties ragProperties;
+    // 单元测试直接 new 服务时使用无状态指标实例；Spring 启动后通过 setter 注入真实 MeterRegistry。
+    private RagMetrics metrics = RagMetrics.noop();
 
     /**
      * 使用 WebFlux 返回回答内容的流。
      */
     public Flux<String> streamAnswerFlux(long postId, String question, int topK, int maxTokens) {
-        String requestId = UUID.randomUUID().toString();
+        return streamAnswerFlux(
+                postId, question, topK, maxTokens, UUID.randomUUID().toString(), "unknown");
+    }
+
+    /**
+     * 旧版文本 SSE 使用稳定 requestId，但仍把同步故障转换为兼容文案。
+     */
+    public Flux<String> streamAnswerFlux(long postId,
+                                         String question,
+                                         int topK,
+                                         int maxTokens,
+                                         String requestId,
+                                         String principalType) {
+        return streamAnswer(postId, question, topK, maxTokens, requestId, principalType, false);
+    }
+
+    /**
+     * v2 SSE 保留同步错误类型，由 Controller 转换为结构化 error 事件。
+     */
+    public Flux<String> streamAnswerFluxV2(long postId,
+                                           String question,
+                                           int topK,
+                                           int maxTokens,
+                                           String requestId,
+                                           String principalType) {
+        return streamAnswer(postId, question, topK, maxTokens, requestId, principalType, true);
+    }
+
+    @Autowired
+    void setMetrics(RagMetrics metrics) {
+        this.metrics = metrics;
+    }
+
+    private Flux<String> streamAnswer(long postId,
+                                      String question,
+                                      int topK,
+                                      int maxTokens,
+                                      String requestId,
+                                      String principalType,
+                                      boolean structuredErrors) {
+        // 同步索引和检索阶段运行在当前线程；用 try-with-resources 确保 MDC 不污染后续请求。
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("requestId", requestId)) {
+            return buildAnswerFlux(
+                    postId, question, topK, maxTokens, requestId, principalType, structuredErrors);
+        }
+    }
+
+    private Flux<String> buildAnswerFlux(long postId,
+                                         String question,
+                                         int topK,
+                                         int maxTokens,
+                                         String requestId,
+                                         String principalType,
+                                         boolean structuredErrors) {
         long queryStartedNanos = System.nanoTime();
         // Controller 已完成非空校验；这里统一去掉首尾空格，避免空白影响 Embedding 和 Prompt。
         String normalizedQuestion = question.trim();
@@ -76,37 +134,52 @@ public class RagQueryService {
             indexResult = indexService.ensureIndexed(postId);
         } catch (RuntimeException e) {
             logSynchronousFailure(requestId, postId, "index", queryStartedNanos, e);
+            metrics.error("index");
+            metrics.requestCompleted("index_error", elapsedMillis(queryStartedNanos));
             // 同步异常发生在 Flux 建立前；转换为固定 SSE 文案，前端不会只看到断开的空响应。
-            return Flux.just(RagMessages.SERVICE_UNAVAILABLE_ANSWER);
+            return failureFlux(structuredErrors, "RAG_INDEX_UNAVAILABLE",
+                    RagMessages.SERVICE_UNAVAILABLE_ANSWER, true);
         }
         long indexMs = elapsedMillis(indexStartedNanos);
         if (indexResult.status() != RagIndexStatus.READY) {
             // 索引失败时禁止继续读取可能属于旧版本的向量，避免用过期正文回答用户。
             log.info("RAG query completed requestId={} status=index_unavailable postId={} indexStatus={} totalMs={}",
                     requestId, postId, indexResult.status(), elapsedMillis(queryStartedNanos));
-            return Flux.just(indexResult.message());
+            metrics.requestCompleted("index_unavailable", elapsedMillis(queryStartedNanos));
+            return failureFlux(structuredErrors, "RAG_INDEX_UNAVAILABLE",
+                    indexResult.message(), indexResult.status() != RagIndexStatus.SKIPPED);
         }
 
         // 检索上下文：先在向量库中限定当前知文，再从该知文内部进行宽召回。
         long retrievalStartedNanos = System.nanoTime();
-        List<RagContext> contexts;
+        SearchOutcome searchOutcome;
         try {
-            contexts = searchContexts(String.valueOf(postId), normalizedQuestion, normalizedTopK);
+            searchOutcome = searchContextsDetailed(String.valueOf(postId), normalizedQuestion, normalizedTopK);
         } catch (RuntimeException e) {
             logSynchronousFailure(requestId, postId, "retrieval", queryStartedNanos, e);
-            return Flux.just(RagMessages.SERVICE_UNAVAILABLE_ANSWER);
+            metrics.error("retrieval");
+            metrics.requestCompleted("retrieval_error", elapsedMillis(queryStartedNanos));
+            return failureFlux(structuredErrors, "RAG_RETRIEVAL_UNAVAILABLE",
+                    RagMessages.SERVICE_UNAVAILABLE_ANSWER, true);
         }
         long retrievalMs = elapsedMillis(retrievalStartedNanos);
+        List<RagContext> contexts = searchOutcome.contexts();
         List<String> chunkIds = contexts.stream().map(RagContext::chunkId).toList();
         log.info("RAG retrieval completed requestId={} postId={} retrievalMode=hybrid_current_post topK={} fetchK={} "
-                        + "similarityThreshold={} hitCount={} chunkIds={} indexMs={} retrievalMs={}",
+                        + "similarityThreshold={} vectorHitCount={} keywordHitCount={} finalHitCount={} "
+                        + "maxVectorScore={} minAcceptedScore={} avgAcceptedScore={} chunkIds={} indexMs={} retrievalMs={}",
                 requestId, postId, normalizedTopK, fetchK,
-                ragProperties.getRetrieval().getSimilarityThreshold(), contexts.size(), chunkIds, indexMs, retrievalMs);
+                ragProperties.getRetrieval().getSimilarityThreshold(),
+                searchOutcome.vectorHitCount(), searchOutcome.keywordHitCount(), contexts.size(),
+                searchOutcome.maxVectorScore(), searchOutcome.minAcceptedScore(),
+                searchOutcome.avgAcceptedScore(), chunkIds, indexMs, retrievalMs);
+        metrics.retrievalCompleted(retrievalMs, contexts.isEmpty());
 
         if (contexts.isEmpty()) {
             // 没有事实依据时不调用 DeepSeek，既降低幻觉，也节省一次模型生成成本。
             log.info("RAG query completed requestId={} status=no_context postId={} modelCalled=false totalMs={}",
                     requestId, postId, elapsedMillis(queryStartedNanos));
+            metrics.requestCompleted("no_context", elapsedMillis(queryStartedNanos));
             return Flux.just(RagMessages.NO_CONTEXT_ANSWER);
         }
 
@@ -117,12 +190,13 @@ public class RagQueryService {
         int estimatedPromptTokens = tokenTracker.estimatePromptTokens(system, user);
         QueryLogContext logContext = new QueryLogContext(
                 requestId, postId, normalizedTopK, fetchK, chunkIds, indexMs, retrievalMs,
-                maxTokens, estimatedPromptTokens, queryStartedNanos);
+                maxTokens, estimatedPromptTokens, queryStartedNanos, principalType);
         log.info("RAG prompt prepared requestId={} postId={} model={} estimatedPromptTokens={} maxTokens={} sourceCount={}",
                 requestId, postId, CHAT_MODEL, estimatedPromptTokens, maxTokens, contexts.size());
 
         // 每次订阅创建独立状态，避免多个订阅者共享首 Token、usage 和回答缓冲区。
         return Flux.defer(() -> {
+            metrics.modelCalled();
             AtomicBoolean firstTokenSeen = new AtomicBoolean(false);
             AtomicBoolean terminalLogged = new AtomicBoolean(false);
             AtomicLong firstTokenMs = new AtomicLong(-1L);
@@ -130,27 +204,37 @@ public class RagQueryService {
             AtomicReference<String> finishReason = new AtomicReference<>("unknown");
             StringBuilder generatedText = new StringBuilder();
 
-            Flux<String> modelDeltas = chatClient
-                    .prompt()
-                    .system(system)
-                    .user(user)
-                    .options(DeepSeekChatOptions.builder()
-                            .model(CHAT_MODEL)
-                            .temperature(0.2)
-                            .maxTokens(maxTokens)
-                            .build())
-                    .stream()
-                    .chatResponse()
-                    .doOnNext(response -> captureResponseMetadata(response, providerUsage, finishReason))
-                    // handle 在跳过 metadata-only 响应的同时保持模型文本片段原始顺序。
-                    .<String>handle((response, sink) -> {
-                        String delta = responseText(response);
-                        if (delta == null || delta.isEmpty()) {
-                            // usage 可能位于不含文本的最后一个流式响应中，因此只跳过输出，不跳过 metadata 处理。
-                            return;
-                        }
-                        sink.next(delta);
-                    });
+            Flux<String> modelDeltas;
+            try {
+                modelDeltas = chatClient
+                        .prompt()
+                        .system(system)
+                        .user(user)
+                        .options(DeepSeekChatOptions.builder()
+                                .model(CHAT_MODEL)
+                                .temperature(0.2)
+                                .maxTokens(maxTokens)
+                                .build())
+                        .stream()
+                        .chatResponse()
+                        .doOnNext(response -> captureResponseMetadata(response, providerUsage, finishReason))
+                        // handle 在跳过 metadata-only 响应的同时保持模型文本片段原始顺序。
+                        .<String>handle((response, sink) -> {
+                            String delta = responseText(response);
+                            if (delta == null || delta.isEmpty()) {
+                                // usage 可能位于不含文本的最后一个流式响应中，因此只跳过输出，不跳过 metadata 处理。
+                                return;
+                            }
+                            sink.next(delta);
+                        });
+            } catch (RuntimeException error) {
+                // ChatClient 在返回 Flux 前同步失败时，内层 doOnError 尚未建立，需要在这里补记终态。
+                terminalLogged.set(true);
+                withMdc(requestId, () ->
+                        logStreamFailure(logContext, firstTokenMs.get(),
+                                generatedText, providerUsage.get(), error));
+                return Flux.error(error);
+            }
 
             // 模型只生成 [S1] 等短别名；后端在 SSE 流中映射为真实 chunkId，并过滤未知来源。
             return citationMapper.mapToChunkIds(modelDeltas, promptSources, requestId, postId)
@@ -159,24 +243,31 @@ public class RagQueryService {
                         if (firstTokenSeen.compareAndSet(false, true)) {
                             long ttftMs = elapsedMillis(queryStartedNanos);
                             firstTokenMs.set(ttftMs);
-                            log.info("RAG first token requestId={} postId={} firstTokenMs={}", requestId, postId, ttftMs);
+                            metrics.firstToken(ttftMs);
+                            withMdc(requestId, () ->
+                                    log.info("RAG first token requestId={} postId={} firstTokenMs={}",
+                                            requestId, postId, ttftMs));
                         }
                     })
                     .doOnComplete(() -> {
                         if (terminalLogged.compareAndSet(false, true)) {
-                            logTerminal(logContext, "success", firstTokenMs.get(), finishReason.get(),
-                                    generatedText, providerUsage.get());
+                            withMdc(requestId, () ->
+                                    logTerminal(logContext, "success", firstTokenMs.get(), finishReason.get(),
+                                            generatedText, providerUsage.get()));
                         }
                     })
                     .doOnError(error -> {
                         if (terminalLogged.compareAndSet(false, true)) {
-                            logStreamFailure(logContext, firstTokenMs.get(), generatedText, providerUsage.get(), error);
+                            withMdc(requestId, () ->
+                                    logStreamFailure(logContext, firstTokenMs.get(),
+                                            generatedText, providerUsage.get(), error));
                         }
                     })
                     .doOnCancel(() -> {
                         if (terminalLogged.compareAndSet(false, true)) {
-                            logTerminal(logContext, "cancelled", firstTokenMs.get(), finishReason.get(),
-                                    generatedText, providerUsage.get());
+                            withMdc(requestId, () ->
+                                    logTerminal(logContext, "cancelled", firstTokenMs.get(), finishReason.get(),
+                                            generatedText, providerUsage.get()));
                         }
                     });
         });
@@ -191,6 +282,13 @@ public class RagQueryService {
      * - 保留 chunkId、position 和 title，为回答引用提供可追溯来源
      */
     List<RagContext> searchContexts(String postId, String query, int topK) {
+        return searchContextsDetailed(postId, query, topK).contexts();
+    }
+
+    /**
+     * 除最终上下文外同时保留低敏聚合分数，供阈值校准和线上排障使用。
+     */
+    SearchOutcome searchContextsDetailed(String postId, String query, int topK) {
         int fetchK = fetchKFor(topK);
         double similarityThreshold = ragProperties.getRetrieval().getSimilarityThreshold();
         // 使用结构化表达式而不是拼接查询字符串，避免特殊字符破坏 ES 查询语法。
@@ -206,7 +304,12 @@ public class RagQueryService {
                         .build()
         );
         List<RagContext> vectorContexts = new ArrayList<>(fetchK);
+        List<Double> vectorScores = new ArrayList<>(fetchK);
+        List<Double> acceptedScores = new ArrayList<>(fetchK);
         for (Document d : docs) {
+            if (d.getScore() != null) {
+                vectorScores.add(d.getScore());
+            }
             if (d.getScore() != null && d.getScore() < similarityThreshold) {
                 // 二次防线：即使替换 VectorStore 实现后忽略了 SearchRequest 阈值，也不放行低相关切片。
                 continue;
@@ -220,20 +323,46 @@ public class RagQueryService {
                     String chunkId = asText(d.getMetadata().get("chunkId"), postId + "#" + position);
                     String title = asText(d.getMetadata().get("title"), "当前知文");
                     vectorContexts.add(new RagContext(chunkId, position, title, txt.trim()));
+                    if (d.getScore() != null) {
+                        acceptedScores.add(d.getScore());
+                    }
                     if (vectorContexts.size() >= fetchK) break;
                 }
             }
         }
+        DoubleSummaryStatistics allScoreStats = vectorScores.stream()
+                .mapToDouble(Double::doubleValue)
+                .summaryStatistics();
+        DoubleSummaryStatistics acceptedScoreStats = acceptedScores.stream()
+                .mapToDouble(Double::doubleValue)
+                .summaryStatistics();
+        Double maxVectorScore = vectorScores.isEmpty() ? null : allScoreStats.getMax();
+        Double minAcceptedScore = acceptedScores.isEmpty() ? null : acceptedScoreStats.getMin();
+        Double avgAcceptedScore = acceptedScores.isEmpty() ? null : acceptedScoreStats.getAverage();
+
         if (vectorContexts.isEmpty()) {
             // BM25 可补充术语排序，但不能单独证明语义相关；无向量证据时直接拒答并节省生成 Token。
-            return List.of();
+            return new SearchOutcome(
+                    List.of(), 0, 0, maxVectorScore, minAcceptedScore, avgAcceptedScore);
         }
         if (keywordSearchService == null) {
-            return vectorContexts.stream().limit(topK).toList();
+            return new SearchOutcome(
+                    vectorContexts.stream().limit(topK).toList(),
+                    vectorContexts.size(),
+                    0,
+                    maxVectorScore,
+                    minAcceptedScore,
+                    avgAcceptedScore);
         }
         List<RagContext> keywordContexts = keywordSearchService.search(postId, query, Math.min(fetchKFor(topK), 10));
         // topK 的接口语义是最终进入 Prompt 的上下文数量，而不是单路召回数量。
-        return mergeContexts(keywordContexts, vectorContexts, topK);
+        return new SearchOutcome(
+                mergeContexts(keywordContexts, vectorContexts, topK),
+                vectorContexts.size(),
+                keywordContexts.size(),
+                maxVectorScore,
+                minAcceptedScore,
+                avgAcceptedScore);
     }
 
     /**
@@ -314,13 +443,17 @@ public class RagQueryService {
                              RagTokenUsage providerUsage) {
         int estimatedCompletionTokens = tokenTracker.estimateText(generatedText.toString());
         int estimatedTotalTokens = context.estimatedPromptTokens() + estimatedCompletionTokens;
+        long totalMs = elapsedMillis(context.queryStartedNanos());
+        metrics.requestCompleted(status, totalMs);
+        metrics.providerTokens(providerUsage);
         log.info("RAG query completed requestId={} status={} postId={} model={} topK={} fetchK={} hitCount={} chunkIds={} "
-                        + "indexMs={} retrievalMs={} firstTokenMs={} totalMs={} finishReason={} maxTokens={} "
+                        + "principalType={} indexMs={} retrievalMs={} firstTokenMs={} totalMs={} finishReason={} maxTokens={} "
                         + "estimatedPromptTokens={} estimatedCompletionTokens={} estimatedTotalTokens={} "
                         + "providerPromptTokens={} providerCompletionTokens={} providerTotalTokens={} tokenUsageSource={}",
                 context.requestId(), status, context.postId(), CHAT_MODEL, context.topK(), context.fetchK(),
-                context.chunkIds().size(), context.chunkIds(), context.indexMs(), context.retrievalMs(), firstTokenMs,
-                elapsedMillis(context.queryStartedNanos()), finishReason, context.maxTokens(),
+                context.chunkIds().size(), context.chunkIds(), context.principalType(),
+                context.indexMs(), context.retrievalMs(), firstTokenMs,
+                totalMs, finishReason, context.maxTokens(),
                 context.estimatedPromptTokens(), estimatedCompletionTokens, estimatedTotalTokens,
                 providerUsage == null ? null : providerUsage.promptTokens(),
                 providerUsage == null ? null : providerUsage.completionTokens(),
@@ -334,6 +467,9 @@ public class RagQueryService {
                                   RagTokenUsage providerUsage,
                                   Throwable error) {
         int estimatedCompletionTokens = tokenTracker.estimateText(generatedText.toString());
+        metrics.error("generation");
+        metrics.requestCompleted("generation_error", elapsedMillis(context.queryStartedNanos()));
+        metrics.providerTokens(providerUsage);
         log.error("RAG query failed requestId={} status=error stage=generation postId={} model={} firstTokenMs={} totalMs={} "
                         + "estimatedPromptTokens={} estimatedCompletionTokens={} providerTotalTokens={} errorType={} message={}",
                 context.requestId(), context.postId(), CHAT_MODEL, firstTokenMs,
@@ -360,6 +496,34 @@ public class RagQueryService {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
 
+    private static Flux<String> failureFlux(boolean structuredErrors,
+                                            String code,
+                                            String message,
+                                            boolean retryable) {
+        return structuredErrors
+                ? Flux.error(new RagStreamException(code, message, retryable))
+                : Flux.just(message);
+    }
+
+    private static void withMdc(String requestId, Runnable action) {
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("requestId", requestId)) {
+            action.run();
+        }
+    }
+
+    /**
+     * 一次检索的结果和聚合分数。只记录统计值，不把完整候选分数长期写入业务日志。
+     */
+    record SearchOutcome(
+            List<RagContext> contexts,
+            int vectorHitCount,
+            int keywordHitCount,
+            Double maxVectorScore,
+            Double minAcceptedScore,
+            Double avgAcceptedScore
+    ) {
+    }
+
     /**
      * 固化一次查询的低敏日志上下文，避免在多个 Reactor 回调中重复传递散乱参数。
      */
@@ -373,7 +537,8 @@ public class RagQueryService {
             long retrievalMs,
             int maxTokens,
             int estimatedPromptTokens,
-            long queryStartedNanos
+            long queryStartedNanos,
+            String principalType
     ) {
     }
 

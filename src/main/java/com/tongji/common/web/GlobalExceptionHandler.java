@@ -4,6 +4,7 @@ import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import com.tongji.common.exception.BusinessException;
 import com.tongji.common.exception.ErrorCode;
+import com.tongji.llm.rag.RagRateLimitException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -66,6 +67,20 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * RAG 成本保护统一返回 429/503，并通过 Retry-After 告知前端何时可重试。
+     */
+    @ExceptionHandler(RagRateLimitException.class)
+    public ResponseEntity<Map<String, Object>> handleRagRateLimit(RagRateLimitException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("code", ex.getCode());
+        body.put("message", ex.getMessage());
+        body.put("retryAfter", ex.getRetryAfterSeconds());
+        return ResponseEntity.status(ex.getStatus())
+                .header("Retry-After", String.valueOf(ex.getRetryAfterSeconds()))
+                .body(body);
+    }
+
+    /**
      * 未处理异常统一返回：HTTP 500。
      * 记录错误日志并返回通用提示。
      *
@@ -81,4 +96,3 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 }
-

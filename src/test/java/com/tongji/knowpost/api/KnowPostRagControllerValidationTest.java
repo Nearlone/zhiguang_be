@@ -20,11 +20,15 @@ class KnowPostRagControllerValidationTest {
     @BeforeEach
     void setUp() throws NoSuchMethodException {
         // 本测试只检查方法参数注解，不会执行 Controller，因此两个业务依赖可以为空。
-        controller = new KnowPostRagController(null, null, null);
+        controller = new KnowPostRagController(null, null, null, null);
         validator = Validation.buildDefaultValidatorFactory().getValidator();
         // ExecutableValidator 需要 Method 对象，借此校验 qaStream 四个入参上的约束。
         qaStream = KnowPostRagController.class.getMethod(
-                "qaStream", long.class, String.class, int.class, int.class);
+                "qaStream", long.class, String.class, int.class, int.class,
+                String.class,
+                org.springframework.security.oauth2.jwt.Jwt.class,
+                jakarta.servlet.http.HttpServletRequest.class,
+                jakarta.servlet.http.HttpServletResponse.class);
     }
 
     @Test
@@ -63,6 +67,7 @@ class KnowPostRagControllerValidationTest {
             long id, String question, int topK, int maxTokens) {
         // 直接执行 Bean Validation，测试速度快且不需要启动 Spring 容器。
         return validator.forExecutables().validateParameters(
-                controller, qaStream, new Object[]{id, question, topK, maxTokens});
+                controller, qaStream,
+                new Object[]{id, question, topK, maxTokens, null, null, null, null});
     }
 }

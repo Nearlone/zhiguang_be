@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RagQueryServiceTest {
 
@@ -133,6 +134,44 @@ class RagQueryServiceTest {
                 .block();
 
         assertThat(answer).containsExactly("AI问答服务暂时不可用，请稍后重试。");
+    }
+
+    @Test
+    void preservesRetrievalErrorTypeForStructuredSse() {
+        RagQueryService service = new RagQueryService(
+                vectorStoreThrowing(new IllegalStateException("embedding endpoint details")), null, indexService,
+                new RagPromptBuilder(), new RagTokenTracker(), new RagCitationMapper(), null, new RagProperties());
+
+        assertThatThrownBy(() -> service
+                .streamAnswerFluxV2(123L, "文章讲了什么？", 5, 1024, "request-1", "anonymous")
+                .collectList()
+                .block())
+                .isInstanceOfSatisfying(RagStreamException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("RAG_RETRIEVAL_UNAVAILABLE");
+                    assertThat(error.getMessage()).doesNotContain("endpoint");
+                    assertThat(error.isRetryable()).isTrue();
+                });
+    }
+
+    @Test
+    void aggregatesAcceptedVectorScoresWithoutExposingEveryCandidate() {
+        List<Document> vectors = List.of(
+                Document.builder().text("证据1")
+                        .metadata(Map.of("postId", "123", "chunkId", "123#1", "position", 1))
+                        .score(0.8).build(),
+                Document.builder().text("证据2")
+                        .metadata(Map.of("postId", "123", "chunkId", "123#2", "position", 2))
+                        .score(0.6).build());
+        RagQueryService service = new RagQueryService(
+                vectorStoreReturning(vectors), null, null,
+                new RagPromptBuilder(), new RagTokenTracker(), new RagCitationMapper(), null, new RagProperties());
+
+        RagQueryService.SearchOutcome outcome = service.searchContextsDetailed("123", "问题", 5);
+
+        assertThat(outcome.vectorHitCount()).isEqualTo(2);
+        assertThat(outcome.maxVectorScore()).isEqualTo(0.8);
+        assertThat(outcome.minAcceptedScore()).isEqualTo(0.6);
+        assertThat(outcome.avgAcceptedScore()).isEqualTo(0.7);
     }
 
     @Test

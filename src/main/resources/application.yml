@@ -80,6 +80,14 @@ rag:
   embedding:
     connect-timeout: ${RAG_EMBEDDING_CONNECT_TIMEOUT:5s}
     read-timeout: ${RAG_EMBEDDING_READ_TIMEOUT:20s}
+  rate-limit:
+    # RAG 会消耗 Embedding 与生成 Token，因此匿名接口默认启用速率和并发双重保护。
+    enabled: ${RAG_RATE_LIMIT_ENABLED:true}
+    anonymous-permits-per-minute: ${RAG_ANONYMOUS_PERMITS_PER_MINUTE:10}
+    authenticated-permits-per-minute: ${RAG_AUTHENTICATED_PERMITS_PER_MINUTE:30}
+    max-concurrent-per-subject: ${RAG_MAX_CONCURRENT_PER_SUBJECT:2}
+    concurrency-lease: ${RAG_CONCURRENCY_LEASE:3m}
+    retry-after: ${RAG_RATE_LIMIT_RETRY_AFTER:60s}
 
 canal:
   enabled: true

@@ -1,0 +1,45 @@
+{"qid":"Q01-F","corpus":"扩展15篇","postId":"336079253844135936","type":"事实","question":"QuestionAnswerAdvisor 在一次问答中依次完成哪些工作？SearchRequest 的 topK 和 similarityThreshold 分别控制什么？","expected":"相似度检索、追加上下文、交给 ChatClient；topK 控制候选上限，阈值过滤低相关结果"}
+{"qid":"Q01-M","corpus":"扩展15篇","postId":"336079253844135936","type":"机制","question":"为什么单篇知文问答应在向量检索阶段按 postId 过滤？空上下文时又应该怎样处理？","expected":"避免全站内容竞争后再过滤；保证范围与权限；默认拒答，通常不启用 allowEmptyContext(true)"}
+{"qid":"Q01-N","corpus":"扩展15篇","postId":"336079253844135936","type":"拒答","question":"这篇知文规定 Kafka Topic 应配置几个分区吗？请给出具体数量。","expected":"当前知文无依据，应拒答，不给出分区数量"}
+{"qid":"Q02-F","corpus":"扩展15篇","postId":"336079782083170304","type":"事实","question":"BM25 和向量检索各自更擅长召回什么类型的问题？","expected":"BM25 擅长精确术语、错误码、数字等；向量检索擅长语义、同义改写和上下文关系"}
+{"qid":"Q02-M","corpus":"扩展15篇","postId":"336079782083170304","type":"机制","question":"请梳理单篇知文的混合检索链路，并解释为什么不能直接把 BM25 分数和向量相似度相加。","expected":"两路均按 postId 过滤；分别召回；融合、去重、截断、保留来源；两类分数不同量纲，宜用 RRF 或校准归一化"}
+{"qid":"Q02-N","corpus":"扩展15篇","postId":"336079782083170304","type":"拒答","question":"该文是否给出了 Refresh Token 在 Redis 中的具体 TTL？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q03-F","corpus":"扩展15篇","postId":"336079836294549504","type":"事实","question":"RRF 的计算公式是什么？常量 k 变大或变小时会怎样影响排名差距？","expected":"分数为各通道 `1/(k+rank)` 之和；k 小放大头部优势，k 大使相邻名次更平缓；常见默认 60"}
+{"qid":"Q03-M","corpus":"扩展15篇","postId":"336079836294549504","type":"机制","question":"RRF 融合时为什么要按 chunkId 去重？同一路结果重复和最终同分又应怎样处理？","expected":"跨路累计贡献但不重复上下文；同一路重复只能投票一次；同分使用稳定次级排序以保证可复现"}
+{"qid":"Q03-N","corpus":"扩展15篇","postId":"336079836294549504","type":"拒答","question":"RRF 使用的神经网络有多少层，训练数据规模是多少？","expected":"RRF 无需训练且本文无此信息，应拒答"}
+{"qid":"Q04-F","corpus":"扩展15篇","postId":"336079887662190592","type":"事实","question":"dense_vector 映射中的 dims 必须满足什么契约？更换 Embedding 模型后可能需要做什么？","expected":"dims 与模型输出一致；不同维度无法写入；更换模型或维度通常需要新索引或全量重建"}
+{"qid":"Q04-M","corpus":"扩展15篇","postId":"336079887662190592","type":"机制","question":"向量量化为什么常与过采样和重排一起使用？这种方案有哪些成本与收益？","expected":"量化降低内存但损失精度；扩大候选后用原始向量重排可找回结果；增加计算，最终上下文仍需限制"}
+{"qid":"Q04-N","corpus":"扩展15篇","postId":"336079887662190592","type":"拒答","question":"这篇知文解释了 MySQL 的 MVCC 如何生成 Read View 吗？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q05-F","corpus":"扩展15篇","postId":"336079913587183616","type":"事实","question":"text-embedding-v3 默认输出多少维？文中列出了哪些可选维度？","expected":"默认 1024；可选 768、512、256、128、64"}
+{"qid":"Q05-M","corpus":"扩展15篇","postId":"336079913587183616","type":"机制","question":"索引文章与检索问题时，query 和 document 有什么区别？知光为什么仍可以用 BM25 加稠密向量构建混合检索？","expected":"query 更短且有检索方向，document 是长正文；兼容接口需核对能力；BM25 负责关键词、稠密向量负责语义、RRF 融合"}
+{"qid":"Q05-N","corpus":"扩展15篇","postId":"336079913587183616","type":"拒答","question":"DeepSeek 官方建议的 temperature 默认值在本文中是多少？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q06-F","corpus":"扩展15篇","postId":"336079932906147840","type":"事实","question":"max_tokens 限制的是输入还是输出？设置过小和过大分别有什么风险？","expected":"限制输出 Token；过小会因 length 截断；过大增加最坏成本和响应时间；总长度仍受上下文窗口限制"}
+{"qid":"Q06-M","corpus":"扩展15篇","postId":"336079932906147840","type":"机制","question":"流式回答怎样正确记录 Token usage 和首段文本？为什么不能把每个响应块都当成正文？","expected":"最后额外块可含 usage；部分块只有元数据；先读元数据、跳过空文本；服务商 usage 优先，本地估算只作降级"}
+{"qid":"Q06-N","corpus":"扩展15篇","postId":"336079932906147840","type":"拒答","question":"本文能否确定 DashScope text-embedding-v4 的向量维度？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q07-F","corpus":"扩展15篇","postId":"336079968226381824","type":"事实","question":"JwtDecoder 除了解码 JWT，还必须完成哪些安全校验？","expected":"验证签名，并校验 exp、nbf、iss、aud 等关键 claim；只做 Base64 解码不算认证"}
+{"qid":"Q07-M","corpus":"扩展15篇","postId":"336079968226381824","type":"机制","question":"Access Token 和 Refresh Token 的用途有什么区别？无状态 JWT 为什么仍可能需要 Redis？","expected":"Access Token 访问业务且短期；Refresh Token 只用于换新令牌且更长期；Redis 保存 jti 白名单以支持轮换、撤销和登出"}
+{"qid":"Q07-N","corpus":"扩展15篇","postId":"336079968226381824","type":"拒答","question":"这篇知文指定用户密码必须使用 BCrypt 的哪一个 cost 值吗？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q08-F","corpus":"扩展15篇","postId":"336079992557539328","type":"事实","question":"Mono、Flux 和 text/event-stream 在大模型流式回答中分别承担什么角色？","expected":"Mono 表示至多一个异步结果；Flux 表示多个增量；text/event-stream 让服务端持续发送而非等待完整回答"}
+{"qid":"Q08-M","corpus":"扩展15篇","postId":"336079992557539328","type":"机制","question":"流式接口为什么要分别记录检索完成、首 Token 和总耗时？取消或生成中异常时应如何处理？","expected":"三项指标反映不同阶段；首个有效文本结束加载；取消时记录并释放资源；响应头发送后可用 SSE 错误事件或连接异常提示"}
+{"qid":"Q08-N","corpus":"扩展15篇","postId":"336079992557539328","type":"拒答","question":"WebSocket 二进制帧的最大长度在本文中是多少字节？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q09-F","corpus":"扩展15篇","postId":"336080029685518336","type":"事实","question":"请按顺序说明 Markdown 从创建草稿到发布并建立 RAG 索引的上传链路。","expected":"草稿、预签名、后端校验并生成 objectKey/PUT URL、前端直传、取得 ETag/大小/SHA-256、确认正文、更新元数据、发布和索引"}
+{"qid":"Q09-M","corpus":"扩展15篇","postId":"336080029685518336","type":"机制","question":"为什么签名时和实际上传时的 Content-Type 必须一致？objectKey 为什么应由后端生成？","expected":"不一致会导致签名校验失败；扩展名和 accept 不可信；后端生成路径并校验所有者可防越权覆盖和任意路径写入"}
+{"qid":"Q09-N","corpus":"扩展15篇","postId":"336080029685518336","type":"拒答","question":"Kafka 消费者应该多久提交一次 offset？本文给出了毫秒数吗？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q10-F","corpus":"扩展15篇","postId":"336080061428011008","type":"事实","question":"消费者先提交 offset 再处理与先处理再提交，分别更接近哪种投递语义？","expected":"先提交再处理可能丢失，为 at most once；先处理再提交可能重复，为 at least once"}
+{"qid":"Q10-M","corpus":"扩展15篇","postId":"336080061428011008","type":"机制","question":"acks=all、min.insync.replicas、幂等生产者和消费者幂等分别解决什么问题？为什么仍不能直接宣称外部数据库写入 exactly once？","expected":"前两者提高副本确认可靠性；幂等生产者抑制发送重试重复；消费者用唯一键/事件 ID 等去重；外部系统通常不加入 Kafka 事务"}
+{"qid":"Q10-N","corpus":"扩展15篇","postId":"336080061428011008","type":"拒答","question":"OSS 预签名 URL 的有效期应该设置为多少秒？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q11-F","corpus":"扩展15篇","postId":"336080100665724928","type":"事实","question":"Transactional Outbox 如何解决业务数据更新与发送消息之间的双写问题？","expected":"业务数据和 Outbox 事件在同一本地事务写入；任一失败共同回滚；提交后由轮询或 CDC 发布消息"}
+{"qid":"Q11-M","corpus":"扩展15篇","postId":"336080100665724928","type":"机制","question":"Outbox 为什么仍要求幂等消费和顺序控制？请说明 eventId、分区 key 与版本校验的作用。","expected":"发布成功但状态未更新会重发；eventId 用于去重；实体 ID 作 key 保证同分区；版本防止旧事件覆盖新状态"}
+{"qid":"Q11-N","corpus":"扩展15篇","postId":"336080100665724928","type":"拒答","question":"本文给出了 Canal Server 的 Docker 镜像版本和启动命令吗？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q12-F","corpus":"扩展15篇","postId":"336080452995649536","type":"事实","question":"Canal 读取 MySQL 变更需要哪些关键前置条件？","expected":"开启 Binlog、ROW 模式；复制相关最小权限；唯一 server_id/Slave ID；字符集匹配"}
+{"qid":"Q12-M","corpus":"扩展15篇","postId":"336080452995649536","type":"机制","question":"从 MySQL 到 RAG 索引的 Canal-Kafka 链路是什么？怎样处理同一文章的顺序、重复和重放？","expected":"Binlog、Canal Instance/Server、Kafka、业务消费者、索引；文章 ID 作分区 key；指纹/版本幂等；持久化位点并让下游承受重复"}
+{"qid":"Q12-N","corpus":"扩展15篇","postId":"336080452995649536","type":"拒答","question":"Spring Cache 的 @CacheEvict 默认是在方法执行前还是执行后？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q13-F","corpus":"扩展15篇","postId":"336080482955563008","type":"事实","question":"depends_on 的 service_started、service_healthy 和 service_completed_successfully 分别表示什么？","expected":"容器已启动；健康检查通过；一次性任务成功执行并退出"}
+{"qid":"Q13-M","corpus":"扩展15篇","postId":"336080482955563008","type":"机制","question":"为什么配置了 depends_on 和 healthcheck，应用仍必须实现连接超时与重试？start_period 又解决什么问题？","expected":"启动顺序不能覆盖运行期重启和网络故障；普通 started 不等于可用；start_period 给慢启动初始化窗口，避免过早计失败"}
+{"qid":"Q13-N","corpus":"扩展15篇","postId":"336080482955563008","type":"拒答","question":"本文中的 RRF 平滑常量 k 设置为多少？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q14-F","corpus":"扩展15篇","postId":"336080528698642432","type":"事实","question":"MyBatis 的 where、trim 和 set 标签分别解决哪些 SQL 拼接问题？","expected":"where 按需生成 WHERE 并移除前导 AND/OR；trim 通用处理前后缀；set 按需生成 SET 并去掉尾逗号"}
+{"qid":"Q14-M","corpus":"扩展15篇","postId":"336080528698642432","type":"机制","question":"foreach 处理空集合时有什么风险？为什么普通值应使用 #{}，而 ${} 只能用于严格白名单场景？","expected":"空集合可能生成非法 IN()；#{} 使用预编译参数；${} 直接文本拼接，用户输入会带来 SQL 注入风险"}
+{"qid":"Q14-N","corpus":"扩展15篇","postId":"336080528698642432","type":"拒答","question":"JWT Access Token 的有效期在本文中配置为多少分钟？","expected":"当前知文无依据，应拒答"}
+{"qid":"Q15-F","corpus":"扩展15篇","postId":"336080581618176000","type":"事实","question":"@Cacheable、@CachePut 和 @CacheEvict 的执行语义有什么区别？","expected":"Cacheable 命中则跳过方法、未命中执行并写入；CachePut 总执行再更新；CacheEvict 删除缓存，默认成功后删除"}
+{"qid":"Q15-M","corpus":"扩展15篇","postId":"336080581618176000","type":"机制","question":"为什么类内部直接调用缓存方法可能导致注解不生效？多级缓存更新后又要考虑哪些一致性问题？","expected":"Spring AOP 代理边界，自调用绕过代理；还需考虑删除顺序、消息通知、短暂不一致、失败补偿或短 TTL"}
+{"qid":"Q15-N","corpus":"扩展15篇","postId":"336080581618176000","type":"拒答","question":"Elasticsearch dense_vector 的维度在本文中固定为多少？","expected":"当前知文无依据，应拒答"}

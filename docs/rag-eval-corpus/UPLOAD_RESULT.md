@@ -25,6 +25,21 @@
 
 汇总：15 篇知文，97 条向量，全部为 `published/public/READY`。
 
+## 本地 5 篇补充语料
+
+2026-07-17 将此前通过前端上传的 5 篇本地学习笔记正式纳入同一套 P0 评测口径。
+
+| 标题 | 知文 ID | 发布状态 | RAG 状态 | 向量数 |
+| --- | --- | --- | --- | ---: |
+| `RAG 工程化详细学习文档` | `335984259514896384` | `PUBLISHED` | `READY` | 71 |
+| `Embedding与向量检索` | `335984638235381760` | `PUBLISHED` | `READY` | 34 |
+| `缓存穿透、击穿、雪崩与一致性` | `335984851201167360` | `PUBLISHED` | `READY` | 35 |
+| `线程池ThreadPoolExecutor` | `335984979240685568` | `PUBLISHED` | `READY` | 38 |
+| `事务与MVCC` | `335705124099985408` | `PUBLISHED` | `READY` | 30 |
+
+20 篇汇总：数据库状态均为 `published/public/READY`；Elasticsearch 按 `postId` 聚合得到
+305 条向量，与数据库记录的切片数逐篇一致。
+
 ## 校验口径
 
 - MySQL：核对 `status`、`visible`、`rag_index_status` 和 `rag_index_chunk_count`。
